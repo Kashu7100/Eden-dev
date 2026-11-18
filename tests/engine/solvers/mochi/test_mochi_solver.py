@@ -9,7 +9,7 @@ import sys
 import genesis as gs
 import numpy as np
 import pytest
-from genesis.utils.misc import tensor_to_array
+from genesis.utils.misc import qd_to_torch, tensor_to_array
 
 from eden.engine.solvers.mochi import MochiOptions, create_mochi_scene
 from eden.engine.solvers.mochi import materials as mochi_materials
@@ -289,6 +289,189 @@ def test_state_reset_restores_trajectory(show_viewer):
     for i_step in range(30):
         scene.step()
         assert_allclose(box.get_pos(), trajectory[i_step], tol=1e-9)
+
+
+def _is_inside_geom(solver, geom, points, env_idx):
+    distances, _, _ = solver.get_collider_distances(geom.idx, points, envs_idx=[env_idx])
+    return tensor_to_array(distances < 0.0)
+
+
+@pytest.mark.precision("64")
+def test_moving_a_fixed_body_moves_its_collision_geom(show_viewer):
+    scene = _mochi_scene(show_viewer, 1.0 / 60.0, n_newton_iterations=8)
+    scene.add_entity(gs.morphs.Plane(), material=mochi_materials.Rigid())
+    table = scene.add_entity(
+        gs.morphs.Box(size=(0.4, 0.4, 0.2), pos=(0.0, 0.0, 0.1), fixed=True, batch_fixed_verts=True),
+        material=mochi_materials.Rigid(),
+    )
+    ball = scene.add_entity(gs.morphs.Sphere(radius=0.05, pos=(0.0, 0.0, 0.3)), material=mochi_materials.Rigid())
+    scene.build(n_envs=2)
+    solver = scene.mochi_solver
+    for _ in range(20):
+        scene.step()
+    state = scene.get_state()
+    assert_allclose(ball.get_pos()[:, 2], 0.25, atol=2e-3)
+
+    def is_inside_table(points, env_idx):
+        return _is_inside_geom(solver, table.geoms[0], points, env_idx)
+
+    def is_ball_touching_table():
+        return tensor_to_array(ball.get_contacts(with_entity=table)["valid_mask"].any(dim=-1))
+
+    # The table moved away in environment 0 alone collides at its new place there at once, its box with it, and the
+    # ball drops onto the ground. Environment 1 keeps the table and the ball resting on it. The contacts read back
+    # before the move are found again against the moved geom.
+    assert_array_equal(is_ball_touching_table(), [True, True])
+    table.set_pos(np.array([[5.0, 0.0, 0.1]]), envs_idx=[0])
+    assert_array_equal(is_inside_table([[5.0, 0.0, 0.1], [0.0, 0.0, 0.1]], 0), [True, False])
+    assert_array_equal(is_inside_table([[5.0, 0.0, 0.1], [0.0, 0.0, 0.1]], 1), [False, True])
+    aabb_min = qd_to_torch(solver.dyn_state.geoms.aabb_min)[table.geoms[0].idx]
+    assert_allclose(aabb_min[:, 0], [4.8, -0.2], tol=1e-9)
+    assert_array_equal(is_ball_touching_table(), [False, True])
+    for _ in range(30):
+        scene.step()
+    ball_z = tensor_to_array(ball.get_pos()[:, 2])
+    assert_allclose(ball_z[0], 0.05, atol=2e-3)
+    assert_allclose(ball_z[1], 0.25, atol=2e-3)
+
+    # A move with the forward kinematics deferred, and a rotation, move the geom too: a quarter turn about x stands the
+    # 0.2 m tall table 0.4 m tall.
+    table.set_pos(np.array([[0.0, 5.0, 0.1]]), envs_idx=[0], skip_forward=True)
+    assert_array_equal(is_inside_table([[0.0, 5.0, 0.1], [5.0, 0.0, 0.1]], 0), [True, False])
+    table.set_quat(np.array([[np.sqrt(0.5), np.sqrt(0.5), 0.0, 0.0]]), envs_idx=[0])
+    assert_array_equal(is_inside_table([[0.0, 5.0, 0.28]], 0), [True])
+
+    # Restoring the state taken before the moves in environment 0 puts the geom back there and leaves environment 1,
+    # moved since, as it is. Restoring every environment puts it back in both.
+    table.set_pos(np.array([[0.0, 5.0, 0.1]]), envs_idx=[1])
+    scene.reset(state, envs_idx=[0])
+    assert_array_equal(is_inside_table([[0.0, 0.0, 0.1], [0.0, 5.0, 0.1]], 0), [True, False])
+    assert_array_equal(is_inside_table([[0.0, 0.0, 0.1], [0.0, 5.0, 0.1]], 1), [False, True])
+    aabb_min = qd_to_torch(solver.dyn_state.geoms.aabb_min)[table.geoms[0].idx]
+    assert_allclose(aabb_min[:, :2], [[-0.2, -0.2], [-0.2, 4.8]], tol=1e-9)
+    scene.reset(state)
+    for env_idx in range(2):
+        assert_array_equal(is_inside_table([[0.0, 0.0, 0.1], [0.0, 5.0, 0.1]], env_idx), [True, False])
+
+
+@pytest.mark.precision("64")
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_fixed_body_with_shared_vertices_takes_one_pose_in_every_env(n_envs, show_viewer):
+    scene = _mochi_scene(show_viewer, 1.0 / 60.0)
+    tables = [
+        scene.add_entity(
+            gs.morphs.Box(size=(0.4, 0.4, 0.2), pos=(x, 0.0, 0.1), fixed=True, batch_fixed_verts=False),
+            material=mochi_materials.Rigid(),
+            name=name,
+        )
+        for x, name in ((0.0, "a"), (1.0, "b"))
+    ]
+    scene.build(n_envs=n_envs)
+    solver = scene.mochi_solver
+    links_idx = [table.base_link_idx for table in tables]
+
+    def assert_tables_at(xs):
+        for table, x in zip(tables, xs):
+            assert_allclose(table.get_pos(), np.broadcast_to([x, 0.0, 0.1], (max(n_envs, 1), 3)).squeeze(), tol=1e-12)
+            if n_envs > 0:
+                for env_idx in range(n_envs):
+                    is_inside = _is_inside_geom(solver, table.geoms[0], [[x, 0.0, 0.1], [x + 0.5, 0.0, 0.1]], env_idx)
+                    assert_array_equal(is_inside, [True, False])
+
+    # One pose per table, the same in every environment, moves each table and its geom, whether the solver is given
+    # the tables' links, all its base links, a slice of them, or a link twice (the last pose wins).
+    solver.set_base_links_pos(np.array([[2.0, 0.0, 0.1], [4.0, 0.0, 0.1]]), links_idx)
+    assert_tables_at([2.0, 4.0])
+    solver.set_base_links_pos(np.array([[3.0, 0.0, 0.1], [5.0, 0.0, 0.1]]))
+    assert_tables_at([3.0, 5.0])
+    solver.set_base_links_pos(np.array([[6.0, 0.0, 0.1]]), slice(links_idx[1], links_idx[1] + 1))
+    assert_tables_at([3.0, 6.0])
+    solver.set_base_links_pos(np.array([[7.0, 0.0, 0.1], [8.0, 0.0, 0.1]]), [links_idx[1], links_idx[1]])
+    assert_tables_at([3.0, 8.0])
+
+    if n_envs > 0:
+        # A pose of its own in some environments is refused before the pose is written (the entity setter zeroes the
+        # DOF velocities first, as on the rigid solver). The error names the table at fault and the poses that differ.
+        with pytest.raises(gs.GenesisException, match=r"called on 1 of the 2 environments \(envs_idx \[0\]\)"):
+            tables[0].set_pos(np.array([[5.0, 0.0, 0.1]]), envs_idx=[0])
+        with pytest.raises(gs.GenesisException, match=r"different orientation .* in env 1\) for the fixed entity 'b'"):
+            tables[1].set_quat(np.array([[1.0, 0.0, 0.0, 0.0], [np.sqrt(0.5), np.sqrt(0.5), 0.0, 0.0]]))
+        assert_tables_at([3.0, 8.0])
+        assert_allclose(tables[1].get_quat(), [[1.0, 0.0, 0.0, 0.0]] * n_envs, tol=1e-12)
+        # q and -q are one orientation, the same in every environment (the rigid solver refuses this call).
+        tables[1].set_quat(np.array([[1.0, 0.0, 0.0, 0.0], [-1.0, 0.0, 0.0, 0.0]]))
+        assert_tables_at([3.0, 8.0])
+
+
+_FIXED_BASE_WITH_CHILD_MJCF = """
+<mujoco>
+  <worldbody>
+    <body name="base" pos="0 0 0.1">
+      <geom type="box" size="0.2 0.2 0.1"/>
+      <body name="top" pos="0 0 0.15">
+        <geom type="box" size="0.05 0.05 0.05"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+
+
+@pytest.mark.precision("64")
+def test_moving_a_fixed_body_moves_the_geoms_of_its_fixed_descendants(tmp_path, show_viewer):
+    path = tmp_path / "fixed_base_with_child.xml"
+    path.write_text(_FIXED_BASE_WITH_CHILD_MJCF)
+    scene = _mochi_scene(show_viewer, 1.0 / 60.0)
+    stand = scene.add_entity(gs.morphs.MJCF(file=str(path)), material=mochi_materials.Rigid(), name="stand")
+    scene.build(n_envs=2)
+    solver = scene.mochi_solver
+    top = stand.get_link("top")
+    assert top.is_fixed and top.geoms and not stand.base_link.geoms
+
+    def assert_top_at(xs):
+        for env_idx, x in enumerate(xs):
+            is_inside = _is_inside_geom(solver, top.geoms[0], [[x, 0.0, 0.25], [5.0 - x, 0.0, 0.25]], env_idx)
+            assert_array_equal(is_inside, [True, False])
+
+    # Its base link, MJCF's world body at the origin, carries no geom, so it takes a pose per environment, as on the
+    # rigid solver, and the child's geom follows in that environment alone. The forward kinematics the move defers
+    # would carry the child link to its new pose, but not its geom.
+    stand.set_pos(np.array([[5.0, 0.0, 0.0]]), envs_idx=[0], skip_forward=True)
+    assert_top_at([5.0, 0.0])
+    scene.step()
+    assert_allclose(top.get_pos(), [[5.0, 0.0, 0.25], [0.0, 0.0, 0.25]], tol=1e-9)
+    assert_top_at([5.0, 0.0])
+
+
+@pytest.mark.precision("64")
+def test_moving_a_fixed_body_moves_the_geom_of_an_entity_attached_to_it(show_viewer):
+    scene = _mochi_scene(show_viewer, 1.0 / 60.0)
+    mount = scene.add_entity(
+        gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.0), fixed=True, collision=False, batch_fixed_verts=False),
+        material=mochi_materials.Rigid(),
+        name="mount",
+    )
+    fixture = scene.add_entity(
+        gs.morphs.Box(size=(0.4, 0.4, 0.2), pos=(0.0, 0.0, 0.1), fixed=True, batch_fixed_verts=False),
+        material=mochi_materials.Rigid(),
+        name="fixture",
+    )
+    fixture.attach(mount, mount.base_link.name)
+    scene.build(n_envs=2)
+    solver = scene.mochi_solver
+    assert not mount.geoms
+
+    def assert_fixture_at(xs):
+        for env_idx, x in enumerate(xs):
+            is_inside = _is_inside_geom(solver, fixture.geoms[0], [[x, 0.0, 0.1], [5.0 - x, 0.0, 0.1]], env_idx)
+            assert_array_equal(is_inside, [True, False])
+
+    # The mount carries no geom, so it takes a pose per environment, as on the rigid solver, and moving it moves the
+    # fixture welded below it in that environment alone.
+    mount.set_pos(np.array([[5.0, 0.0, 0.0]]), envs_idx=[0])
+    assert_fixture_at([5.0, 0.0])
+    mount.set_pos(np.array([5.0, 0.0, 0.0]))
+    assert_fixture_at([5.0, 5.0])
 
 
 def _normal_damping_for_restitution(restitution, impact_speed):
