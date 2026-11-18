@@ -975,7 +975,8 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
                 g.desc.friction = fric
         en.logger.info(
             f"[collision mask] '{self.name}': only links {sorted(keep_links)} collide "
-            f"({len(keep_links)}/{len(unique_links)} links)."
+            f"({len(keep_links)}/{len(unique_links)} links); the others still collide with MJCF / USD "
+            f"entities that set no collision_link_patterns."
         )
 
     @property

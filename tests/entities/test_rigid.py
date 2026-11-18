@@ -1582,11 +1582,18 @@ def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_env):
     assert _solver_by_link(mjcf_env, masked, "contype") == {"base": 0, "pad": 1}
     assert _solver_by_link(mjcf_env, masked, "conaffinity") == {"base": 0, "pad": 1}
     assert _solver_by_link(mjcf_env, masked, "friction") == {"base": 1.0, "pad": pytest.approx(_PAD_FRICTION)}
-    # A primitive box masks globally, so the collider drops its pair with the masked-out link.
     pair_idx = mjcf_env.rigid_solver.collider._collision_pair_idx
+
+    def candidates(other_geom):
+        return {g.link.name: bool(pair_idx[tuple(sorted((g.idx, other_geom.idx)))] >= 0) for g in masked.geoms}
+
+    # The collider drops the masked-out link's pair with a primitive box...
     (box_geom,) = box.geoms
-    candidates = {g.link.name: bool(pair_idx[tuple(sorted((g.idx, box_geom.idx)))] >= 0) for g in masked.geoms}
-    assert candidates == {"base": False, "pad": True}
+    assert candidates(box_geom) == {"base": False, "pad": True}
+    # ...but not with an unmasked MJCF entity, whose contype / conaffinity Genesis reads as a self-collision mask.
+    # The docs state this limit; if a Genesis bump lifts it, this fails so they can be corrected.
+    plain_base = next(g for g in mjcf_env.entities["plain_pads"].geoms if g.link.name == "base")
+    assert candidates(plain_base) == {"base": True, "pad": True}
 
 
 @pytest.mark.parametrize("field", ["default_geoms_friction_torsional", "default_geoms_friction"])

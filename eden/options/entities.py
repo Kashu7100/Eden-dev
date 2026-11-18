@@ -17,6 +17,7 @@ from typing import ClassVar, Literal, TypeAlias
 
 import genesis as gs
 import numpy as np
+from genesis.engine.materials.rigid import FrictionType
 from genesis.options.morphs import Morph
 from genesis.typing import FArrayType, PositiveVec2FType, UnitVec3FType, UnitVec4FType, Vec2FType, Vec3FType
 from pydantic import Field, field_validator
@@ -401,10 +402,15 @@ class BaseEntityOptions(ConfigurableOptions):
         (``[".*pad"]``) so objects are grasped at the pads instead of wedging
         against the inner linkage. Applied before the scene is built (Genesis
         bakes the collision-pair list at build time). ``None`` keeps the morph's
-        default per-geom collision.
+        default per-geom collision. The disabled links still collide with an
+        MJCF or USD entity that sets no ``collision_link_patterns`` of its own:
+        Genesis reads that entity's ``contype`` / ``conaffinity`` as a
+        self-collision mask only.
     collision_friction : float, optional
         Friction coefficient applied to the geoms kept by
-        ``collision_link_patterns`` (e.g. high pad friction for stable grasps).
+        ``collision_link_patterns`` (e.g. high pad friction for stable grasps),
+        in Genesis' material range ``[0.01, 5.0]``. Requires
+        ``collision_link_patterns``.
     batch_fixed_verts : bool
         Whether fixed-geometry vertices are batched for per-env transforms.
     is_support_enabled : bool
@@ -506,7 +512,7 @@ class BaseEntityOptions(ConfigurableOptions):
     contype: int = 0xFFFF
     conaffinity: int = 0xFFFF
     collision_link_patterns: list[str] | None = None
-    collision_friction: float | None = None
+    collision_friction: FrictionType | None = None
     batch_fixed_verts: bool = False
     # Support-surface sampling lives on the *base* options: ``is_support_enabled`` is honored for
     # every rigid entity (``RigidEntity.post_build``), so a primitive or a terrain used as a table
@@ -542,6 +548,17 @@ class BaseEntityOptions(ConfigurableOptions):
     default_geoms_friction: dict[str, float] = {}
     default_geoms_friction_torsional: dict[str, float] = {}
     default_geoms_friction_rolling: dict[str, float] = {}
+
+    def model_post_init(self, context):
+        super().model_post_init(context)
+        if self.collision_friction is not None and not self.collision_link_patterns:
+            raise ValueError(
+                f"collision_friction={self.collision_friction} is set without collision_link_patterns, so no geom "
+                f"would take it: it applies only to the links the collision mask keeps. Fix: name those links with "
+                f"collision_link_patterns=[...], or set the friction without disabling any collision, entity-wide "
+                f"with material=RigidMaterialOptions(friction={self.collision_friction}) or per link with "
+                f"default_geoms_friction={{'<link pattern>': {self.collision_friction}}}."
+            )
 
     def _set_dofs_unactuated(self):
         """Set DOF fields to unactuated defaults."""
