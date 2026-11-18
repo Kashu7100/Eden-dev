@@ -7,7 +7,12 @@ When set, only geoms on links whose name matches one of the patterns keep
 collision; every other link's geoms are disabled (`contype = conaffinity = 0`),
 applied in `RigidEntity.pre_build()` before `scene.build()` (Genesis bakes the
 collision-pair list at build time). `collision_friction` optionally overrides
-the friction of the kept geoms.
+the friction of the kept geoms, at build.
+
+On the rigid solver, the disabled links still collide with an MJCF or USD
+entity that sets no `collision_link_patterns` of its own; the build log names
+those entities. The mask filters primitives, terrains, URDF and mesh-file
+entities.
 
 The motivating use case: a parallel-jaw gripper (Robotiq 2F85) should grasp
 objects at its **fingertip pads**, not wedge them against its inner

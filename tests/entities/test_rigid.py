@@ -1167,7 +1167,7 @@ _TWO_LINK_MJCF = """<mujoco model="two_link"><worldbody>
       <geom name="pad_geom" type="box" size="0.02 0.02 0.02"/></body></body>
 </worldbody></mujoco>"""
 _TORSIONAL, _ROLLING, _MATERIAL_TORSIONAL = 0.02, 0.003, 0.001
-_PAD_FRICTION = 1.7
+_PAD_FRICTION, _LINK_FRICTION, _OWN_BITS = 1.7, 0.9, 0b10
 
 _FREE_DOFS = list(range(6))
 _STABILITY_DAMPING = 2e-4
@@ -1271,6 +1271,19 @@ def mjcf_build(mjcf_assets):
                     ),
                     plain_pads=_two_link(asset),
                     masked_pads=_two_link(asset, collision_link_patterns=["pad"], collision_friction=_PAD_FRICTION),
+                    masked_layered=_two_link(
+                        asset,
+                        collision_link_patterns=["pad"],
+                        collision_friction=_PAD_FRICTION,
+                        default_geoms_friction={"pad": _LINK_FRICTION},
+                    ),
+                    masked_box=BoxOptions(
+                        size=(0.1, 0.1, 0.1),
+                        default_root_pos=(0.6, 0.0, 0.05),
+                        contype=_OWN_BITS,
+                        conaffinity=_OWN_BITS,
+                        collision_link_patterns=["box_baselink"],
+                    ),
                     # A kinematic entity has no collision geoms, so a geom option cannot be written there.
                     **{
                         f"marker_{field}": BoxOptions(
@@ -1597,6 +1610,16 @@ def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_env):
     peers = masked._collision_mask_peers()
     assert "plain_pads" in peers
     assert not {"box", "plane", "masked_pads"} & set(peers)
+
+
+def test_a_collision_mask_keeps_the_kept_geoms_own_bits_and_yields_to_a_link_friction(mjcf_env):
+    """It only disables; and ``default_geoms_friction`` is the more specific of the two friction options."""
+    assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_box"], "contype") == {"box_baselink": _OWN_BITS}
+    assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_box"], "conaffinity") == {"box_baselink": _OWN_BITS}
+    assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_layered"], "friction") == {
+        "base": 1.0,
+        "pad": pytest.approx(_LINK_FRICTION),
+    }
 
 
 @pytest.mark.parametrize(

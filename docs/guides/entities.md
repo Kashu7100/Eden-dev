@@ -643,7 +643,8 @@ contact width sees the full capacity.
   and the other's `conaffinity` share a set bit.
 - `collision_link_patterns` keeps collision only on the links matching the patterns, and disables it on every
   other link, before the scene is built. The composite rigs use `collision_link_patterns=[".*pad"]` on the
-  Robotiq 2F85 so objects are pinched between the pads instead of wedged against the inner linkage.
+  Robotiq 2F85 so objects are pinched between the pads instead of wedged against the inner linkage. That holds
+  for primitive, URDF and mesh-file objects; see the MJCF / USD exception below.
   `collision_friction` sets the friction of the geoms it keeps, and requires `collision_link_patterns`. On the
   rigid solver, the disabled links still collide with an MJCF or USD entity that sets no `collision_link_patterns`
   itself: Genesis treats those entities' masks as self-collision masks. The build log names those entities.
