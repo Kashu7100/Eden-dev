@@ -1573,7 +1573,7 @@ def test_mjcf_geoms_without_condim_parse_to_zero_spin_resistance(mjcf_env):
 
 
 def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_env):
-    """Only the matched link collides, at ``collision_friction``; the others keep their friction and lose their pairs.
+    """Only the matched link collides, at ``collision_friction``; the other keeps its friction and loses its pairs.
 
     The mask used to be written to a geom attribute Genesis does not read, so it logged as applied and changed
     nothing, and ``collision_friction`` aborted the build.
@@ -1582,18 +1582,44 @@ def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_env):
     assert _solver_by_link(mjcf_env, masked, "contype") == {"base": 0, "pad": 1}
     assert _solver_by_link(mjcf_env, masked, "conaffinity") == {"base": 0, "pad": 1}
     assert _solver_by_link(mjcf_env, masked, "friction") == {"base": 1.0, "pad": pytest.approx(_PAD_FRICTION)}
+
+    # Genesis exposes the candidate pairs it built from those bits only through this private table.
     pair_idx = mjcf_env.rigid_solver.collider._collision_pair_idx
 
     def candidates(other_geom):
         return {g.link.name: bool(pair_idx[tuple(sorted((g.idx, other_geom.idx)))] >= 0) for g in masked.geoms}
 
-    # The collider drops the masked-out link's pair with a primitive box...
     (box_geom,) = box.geoms
     assert candidates(box_geom) == {"base": False, "pad": True}
-    # ...but not with an unmasked MJCF entity, whose contype / conaffinity Genesis reads as a self-collision mask.
-    # The docs state this limit; if a Genesis bump lifts it, this fails so they can be corrected.
+    # An unmasked MJCF entity keeps its pairs with the masked-out link, and the build log names it as a peer.
     plain_base = next(g for g in mjcf_env.entities["plain_pads"].geoms if g.link.name == "base")
     assert candidates(plain_base) == {"base": True, "pad": True}
+    peers = masked._collision_mask_peers()
+    assert "plain_pads" in peers
+    assert not {"box", "plane", "masked_pads"} & set(peers)
+
+
+@pytest.mark.parametrize(
+    "options, match",
+    [
+        (
+            dict(collision_link_patterns=["pad", "nope_*"]),
+            r"'rig'.*collision_link_patterns pattern 'nope_\*' matches no link.*\['base', 'pad'\]",
+        ),
+        # A config mod assigns without validation, so the build checks again what construction checked.
+        (
+            dict(collision_friction=1.5, collision_link_patterns=None),
+            r"'rig'.*collision_friction=1\.5 is set without collision_link_patterns",
+        ),
+    ],
+    ids=["unmatched-pattern", "friction-without-mask"],
+)
+def test_a_collision_mask_that_can_take_no_effect_raises_at_build(mjcf_assets, options, match):
+    rig = _two_link(mjcf_assets, collision_link_patterns=["pad"])
+    for name, value in options.items():
+        setattr(rig, name, value)
+    with pytest.raises(ValueError, match=match):
+        build_env(_config(plane=PlaneOptions(), rig=rig))
 
 
 @pytest.mark.parametrize("field", ["default_geoms_friction_torsional", "default_geoms_friction"])
