@@ -227,3 +227,35 @@ def test_sleeping_islands_freeze_and_wake(n_envs, show_viewer):
     for _ in range(10):
         scene.step()
     assert np.all(tensor_to_array(resting.get_pos())[..., 2] < resting_pos[..., 2] + 0.1 - 0.02)
+
+
+@pytest.mark.precision("64")
+@pytest.mark.strict_math
+@pytest.mark.parametrize("step_kernel", ["monolith", "pipeline", "graph"])
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_sleeping_box_velocity_is_zero_under_strict_math(n_envs, step_kernel, show_viewer):
+    """A sleeping body's velocity is exactly zero without fast-math too, where the finite difference of its unchanged
+    quaternion leaves a rounding residue.
+    """
+    size = 0.1
+    scene = _mochi_scene(show_viewer, 0.01, use_sleeping=True, step_kernel=step_kernel)
+    scene.add_entity(gs.morphs.Plane(), material=mochi_materials.Rigid())
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=(size, size, size),
+            pos=(0.0, 0.0, 0.5 * size),
+        ),
+        material=mochi_materials.Rigid(),
+    )
+    scene.build(n_envs=n_envs)
+    for _ in range(40):
+        scene.step()
+    node = scene.mochi_solver.entities.index(box)
+    assert scene.mochi_solver.island_state.nodes_is_asleep.to_numpy()[node].all()
+    box_pos = tensor_to_array(box.get_pos())
+    box_quat = tensor_to_array(box.get_quat())
+    for _ in range(5):
+        scene.step()
+        assert_allclose(box.get_pos(), box_pos, tol=0.0)
+        assert_allclose(box.get_quat(), box_quat, tol=0.0)
+        assert_allclose(box.get_dofs_velocity(), 0.0, tol=0.0)
