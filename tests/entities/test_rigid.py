@@ -1632,15 +1632,12 @@ def test_a_collision_mask_keeps_the_kept_geoms_own_bits_and_yields_to_a_link_fri
     [
         (
             dict(collision_link_patterns=["pad", "nope_*"]),
-            r"'rig'.*`collision_link_patterns` pattern 'nope_\*' matches no link; links: \['base', 'pad'\]",
+            r"'rig'.*`collision_link_patterns` pattern 'nope_\*' matches no link; links: \['base', 'pad'\]\. "
+            r"Fix: correct the pattern",
         ),
         (dict(collision_friction=1.5), r"'rig'.*collision_friction=1\.5 is set without collision_link_patterns"),
-        (
-            dict(collision_link_patterns=["pad"], collision_friction=-1.0),
-            r"'rig'.*collision_friction=-1\.0 must be a finite non-negative",
-        ),
     ],
-    ids=["unmatched-pattern", "friction-without-mask", "negative-friction"],
+    ids=["unmatched-pattern", "friction-without-mask"],
 )
 def test_a_collision_mask_that_can_take_no_effect_raises_before_the_scene_builds(mjcf_assets, options, match):
     with pytest.raises(ValueError, match=match):

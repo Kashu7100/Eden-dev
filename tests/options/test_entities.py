@@ -303,6 +303,13 @@ def test_primitives_take_a_prebuilt_morph_override_and_file_entities_refuse_one(
         BoxOptions(size=(0.1, 0.1, 0.1), morph=42)
 
 
+@pytest.mark.parametrize("friction", [-1.0, float("nan"), float("inf")])
+def test_a_collision_friction_that_is_no_friction_coefficient_is_refused(friction):
+    """Genesis' own check runs only after the scene is built, names neither entity nor option, and lets NaN pass."""
+    with pytest.raises(ValidationError, match="collision_friction"):
+        EntityOptions(file="robot.urdf", collision_link_patterns=[".*pad"], collision_friction=friction)
+
+
 # ── grouped, entity and terrain validation ─────────────────────────────────────────────────────────
 
 

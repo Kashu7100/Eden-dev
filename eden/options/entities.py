@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import ClassVar, Literal, TypeAlias
+from typing import Annotated, ClassVar, Literal, TypeAlias
 
 import genesis as gs
 import numpy as np
@@ -518,7 +518,7 @@ class BaseEntityOptions(ConfigurableOptions):
     contype: int = 0xFFFF
     conaffinity: int = 0xFFFF
     collision_link_patterns: list[str] | None = None
-    collision_friction: float | None = None
+    collision_friction: Annotated[float, Field(ge=0.0, allow_inf_nan=False)] | None = None
     batch_fixed_verts: bool = False
     # Support-surface sampling lives on the *base* options: ``is_support_enabled`` is honored for
     # every rigid entity (``RigidEntity.post_build``), so a primitive or a terrain used as a table
