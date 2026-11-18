@@ -944,30 +944,39 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         the cross-entity filter.
         """
         self._collision_kept_links = None
-        if not self.collision_link_patterns:
-            if self.collision_friction is not None:
-                friction = self.collision_friction
-                raise ValueError(
-                    f"Entity '{self.name}': collision_friction={friction} is set without collision_link_patterns, so "
-                    f"no geom would take it: it applies only to the links the collision mask keeps. Fix: name those "
-                    f"links with collision_link_patterns=[...], or set the friction without disabling any collision, "
-                    f"per link with default_geoms_friction={{'<link pattern>': {friction}}} or entity-wide with "
-                    f"material=RigidMaterialOptions(friction={friction})."
+        if self.is_kinematic:
+            # `collision_friction` is warned about and skipped with the other geom options at `post_build`.
+            if self.collision_link_patterns:
+                en.logger.warning(
+                    f"collision_link_patterns {self.collision_link_patterns} ignored on kinematic entity "
+                    f"'{self.name}': kinematic entities have no collision geometry to mask."
                 )
             return
-        if self.is_kinematic:
-            en.logger.warning(
-                f"collision_link_patterns {self.collision_link_patterns} ignored on kinematic entity '{self.name}': "
-                f"kinematic entities have no collision geometry to mask."
+        friction = self.collision_friction
+        if friction is not None and not self.collision_link_patterns:
+            raise ValueError(
+                f"Entity '{self.name}': collision_friction={friction} is set without collision_link_patterns, so no "
+                f"geom would take it: it applies only to the links the collision mask keeps. Fix: name those links "
+                f"with collision_link_patterns=[...], or set the friction without disabling any collision, per link "
+                f"with default_geoms_friction={{'<link pattern>': {friction}}} or entity-wide with "
+                f"material=RigidMaterialOptions(friction={friction})."
             )
+        if friction is not None and not (math.isfinite(friction) and friction >= 0.0):
+            # `set_friction` refuses a negative value too, but only after `scene.build()` and without naming either.
+            raise ValueError(
+                f"Entity '{self.name}': collision_friction={friction} must be a finite non-negative friction "
+                f"coefficient."
+            )
+        if not self.collision_link_patterns:
             return
         # `_match_geoms` resolves through `find_named_links_idx_local`, which needs a built scene, so its selection
         # (`key_selects` against every link name) is made here, with its two causes reported apart.
         every_link_name = [link.name for link in self._entity.links]
+        link_name_set = set(every_link_name)
         links_with_geoms = {geom.link.name for geom in self.geoms}
         kept = set()
         for pattern in self.collision_link_patterns:
-            matched_links = [name for name in every_link_name if key_selects(pattern, name, every_link_name)]
+            matched_links = [name for name in every_link_name if key_selects(pattern, name, link_name_set)]
             if not matched_links:
                 raise ValueError(
                     f"Entity '{self.name}': `collision_link_patterns` pattern '{pattern}' matches no link; links: "

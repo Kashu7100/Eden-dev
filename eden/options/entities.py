@@ -405,11 +405,12 @@ class BaseEntityOptions(ConfigurableOptions):
         default per-geom collision. A pattern that matches no link with collision
         geoms raises at build. The kept geoms keep their own ``contype`` /
         ``conaffinity``, which from then on filter pairs with other entities
-        too, not only within this one. On the rigid solver, the disabled links
-        still collide with an MJCF or USD entity that sets no
-        ``collision_link_patterns`` of its own: Genesis reads that entity's
-        ``contype`` / ``conaffinity`` as a self-collision mask only. The build
-        log names those entities.
+        too, not only within this one. On the rigid solver, neither the zeroed
+        bits nor the kept ones filter pairs with an MJCF or USD entity that
+        sets no ``collision_link_patterns`` of its own, so the disabled links
+        still collide with it: Genesis reads that entity's ``contype`` /
+        ``conaffinity`` as a self-collision mask, and skips a pair across two
+        entities only when neither has one. The build log names those entities.
     collision_friction : float, optional
         Friction coefficient applied to the geoms kept by
         ``collision_link_patterns`` (e.g. high pad friction for stable grasps),

@@ -1613,7 +1613,8 @@ def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_build):
     assert "only links ['pad'] collide (1/2 links)" in report
     peers = report.split("can still pair with ")[1]
     assert "'plain_pads'" in peers
-    assert not any(f"'{name}'" in peers for name in ("box", "plane", "masked_pads", "masked_box", "masked_marker"))
+    # Primitives have no local mask, and a masked MJCF entity (`masked_layered`) gave its up.
+    assert not any(f"'{name}'" in peers for name in ("box", "plane", "masked_box", "masked_layered", "masked_marker"))
 
 
 def test_a_collision_mask_keeps_the_kept_geoms_own_bits_and_yields_to_a_link_friction(mjcf_env):
@@ -1634,8 +1635,12 @@ def test_a_collision_mask_keeps_the_kept_geoms_own_bits_and_yields_to_a_link_fri
             r"'rig'.*`collision_link_patterns` pattern 'nope_\*' matches no link; links: \['base', 'pad'\]",
         ),
         (dict(collision_friction=1.5), r"'rig'.*collision_friction=1\.5 is set without collision_link_patterns"),
+        (
+            dict(collision_link_patterns=["pad"], collision_friction=-1.0),
+            r"'rig'.*collision_friction=-1\.0 must be a finite non-negative",
+        ),
     ],
-    ids=["unmatched-pattern", "friction-without-mask"],
+    ids=["unmatched-pattern", "friction-without-mask", "negative-friction"],
 )
 def test_a_collision_mask_that_can_take_no_effect_raises_before_the_scene_builds(mjcf_assets, options, match):
     with pytest.raises(ValueError, match=match):
