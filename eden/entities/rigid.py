@@ -939,6 +939,9 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         zeroing them would NOT stop collisions with other entities (e.g. a grasped
         cube). We set it ``False`` so the mask filters cross-entity pairs (see
         ``collider.py``: ``con_skip = (same_entity | ~has_local_mask) & (con_match == 0)``).
+        That rule skips a cross-entity pair only when *neither* entity has a local mask,
+        so the masked-out links still collide with any MJCF or USD entity that has no
+        ``collision_link_patterns`` of its own (another MJCF robot, an MJCF object).
         """
         patterns = getattr(self._options, "collision_link_patterns", None)
         if not patterns:
@@ -962,15 +965,14 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         # Treat contype/conaffinity as a global (cross-entity) filter, not a local one.
         self._entity._is_local_collision_mask = False
         fric = self._options.collision_friction
+        # Write the geom's description: `RigidGeom.contype`/`conaffinity`/`friction` read it, and so do the collider's
+        # pair filter and the solver's geom arrays at `scene.build()`. `set_friction` cannot be called this early, as
+        # it writes the solver's arrays, which `scene.build()` allocates.
         for g in geoms:
-            if g.link.name in keep_links:
-                g._contype = 1
-                g._conaffinity = 1
-                if fric is not None:
-                    g.set_friction(fric)
-            else:
-                g._contype = 0
-                g._conaffinity = 0
+            keep = g.link.name in keep_links
+            g.desc.contype = g.desc.conaffinity = int(keep)
+            if keep and fric is not None:
+                g.desc.friction = fric
         en.logger.info(
             f"[collision mask] '{self.name}': only links {sorted(keep_links)} collide "
             f"({len(keep_links)}/{len(unique_links)} links)."

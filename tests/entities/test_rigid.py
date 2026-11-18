@@ -1167,6 +1167,7 @@ _TWO_LINK_MJCF = """<mujoco model="two_link"><worldbody>
       <geom name="pad_geom" type="box" size="0.02 0.02 0.02"/></body></body>
 </worldbody></mujoco>"""
 _TORSIONAL, _ROLLING, _MATERIAL_TORSIONAL = 0.02, 0.003, 0.001
+_PAD_FRICTION = 1.7
 
 _FREE_DOFS = list(range(6))
 _STABILITY_DAMPING = 2e-4
@@ -1269,6 +1270,7 @@ def mjcf_build(mjcf_assets):
                         default_geoms_friction_torsional={"pad": _TORSIONAL},
                     ),
                     plain_pads=_two_link(asset),
+                    masked_pads=_two_link(asset, collision_link_patterns=["pad"], collision_friction=_PAD_FRICTION),
                     # A kinematic entity has no collision geoms, so a geom option cannot be written there.
                     **{
                         f"marker_{field}": BoxOptions(
@@ -1568,6 +1570,23 @@ def test_mjcf_geoms_without_condim_parse_to_zero_spin_resistance(mjcf_env):
     plain = mjcf_env.entities["plain_pads"]
     assert _solver_by_link(mjcf_env, plain, "friction_torsional") == {"base": 0.0, "pad": 0.0}
     assert _solver_by_link(mjcf_env, plain, "friction_rolling") == {"base": 0.0, "pad": 0.0}
+
+
+def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_env):
+    """Only the matched link collides, at ``collision_friction``; the others keep their friction and lose their pairs.
+
+    The mask used to be written to a geom attribute Genesis does not read, so it logged as applied and changed
+    nothing, and ``collision_friction`` aborted the build.
+    """
+    masked, box = mjcf_env.entities["masked_pads"], mjcf_env.entities["box"]
+    assert _solver_by_link(mjcf_env, masked, "contype") == {"base": 0, "pad": 1}
+    assert _solver_by_link(mjcf_env, masked, "conaffinity") == {"base": 0, "pad": 1}
+    assert _solver_by_link(mjcf_env, masked, "friction") == {"base": 1.0, "pad": pytest.approx(_PAD_FRICTION)}
+    # A primitive box masks globally, so the collider drops its pair with the masked-out link.
+    pair_idx = mjcf_env.rigid_solver.collider._collision_pair_idx
+    (box_geom,) = box.geoms
+    candidates = {g.link.name: bool(pair_idx[tuple(sorted((g.idx, box_geom.idx)))] >= 0) for g in masked.geoms}
+    assert candidates == {"base": False, "pad": True}
 
 
 @pytest.mark.parametrize("field", ["default_geoms_friction_torsional", "default_geoms_friction"])

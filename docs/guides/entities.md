@@ -644,7 +644,10 @@ contact width sees the full capacity.
 - `collision_link_patterns` keeps collision only on the links matching the patterns, and disables it on every
   other link, before the scene is built. The composite rigs use `collision_link_patterns=[".*pad"]` on the
   Robotiq 2F85 so objects are pinched between the pads instead of wedged against the inner linkage.
-  `collision_friction` sets the friction of the geoms it keeps.
+  `collision_friction` sets the friction of the geoms it keeps. The disabled links stop colliding with primitives
+  (plane, box, sphere, ...) and URDF entities, but still collide with an MJCF or USD entity that sets no
+  `collision_link_patterns` itself: Genesis treats those entities' masks as self-collision masks, and it skips a
+  pair across two entities only when neither one does.
 
 A kinematic entity has no collision geometry, so these options are ignored on it with a warning.
 
