@@ -42,11 +42,7 @@ from eden.entities.base import Entity
 from eden.entities.dofs_default_mixin import DofDefaultsMixin
 from eden.entities.support_mixin import PLACEMENT_MARGIN, SupportSurfaceMixin, _kernel_broad_phase
 from eden.options.actuators import ActuatorSpecOptions
-from eden.options.entities import (
-    RESOLVED_DOF_TENSOR_FIELD_NAMES,
-    RIGID_CONSTRAINT_FIELD_NAMES,
-    collision_friction_without_mask_message,
-)
+from eden.options.entities import RESOLVED_DOF_TENSOR_FIELD_NAMES, RIGID_CONSTRAINT_FIELD_NAMES
 from eden.utils.misc import (
     DofPermutation,
     DofRuns,
@@ -608,6 +604,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
     default_geoms_friction: dict[str, float] = {}
     default_geoms_friction_torsional: dict[str, float] = {}
     default_geoms_friction_rolling: dict[str, float] = {}
+    collision_link_patterns: list[str] | None = None
     collision_friction: float | None = None
 
     is_articulated: bool = False
@@ -929,26 +926,6 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
                 f"constraint axis the coefficient scales, or drop the coefficient."
             )
 
-    def _collision_mask_links(self) -> set[str] | None:
-        """The links whose geoms ``collision_link_patterns`` keeps colliding; None when it is unset or ignored.
-
-        Raises if a pattern matches no link that carries collision geoms, as a ``default_geoms_*`` pattern does.
-        """
-        patterns = getattr(self._options, "collision_link_patterns", None)
-        if not patterns or self.is_kinematic:
-            return None
-        links_with_geoms = sorted({g.link.name for g in self._entity.geoms})
-        kept = set()
-        for pattern in patterns:
-            matched = [name for name in links_with_geoms if key_selects(pattern, name, links_with_geoms)]
-            if not matched:
-                raise ValueError(
-                    f"Entity '{self.name}': collision_link_patterns pattern {pattern!r} matches no link with "
-                    f"collision geoms; links with geoms: {links_with_geoms}. Fix the pattern, or remove it."
-                )
-            kept.update(matched)
-        return kept
-
     def _apply_collision_link_mask(self) -> None:
         """Disable collision on every geom outside the links ``collision_link_patterns`` keeps.
 
@@ -956,51 +933,87 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         collision-pair candidate list from per-geom ``contype``/``conaffinity`` at build time and offers no setter
         for them. So the geom's description is written, which ``RigidGeom.contype``/``conaffinity`` return and the
         collider and the solver read at build. Geoms on kept links keep their own bits; the others get
-        ``contype = conaffinity = 0``.
+        ``contype = conaffinity = 0``. The kept links are resolved here, once, for ``collision_friction`` and the
+        report after the build.
 
         Genesis gives an MJCF or USD entity a local collision mask, which filters pairs within the entity only, so
-        zeroing the bits would not stop a collision with a grasped cube. Clearing ``_is_local_collision_mask`` makes
-        the mask filter cross-entity pairs too, except against an entity that keeps a local mask
-        (:meth:`_collision_mask_peers`). Genesis recomputes the flag from the morph when it loads a scene
-        description, so a description Genesis exports keeps the zeroed bits but not the cross-entity filter.
+        zeroing the bits would not stop a collision with a grasped cube. Clearing the private
+        ``_is_local_collision_mask`` (Genesis has no setter) makes the mask filter cross-entity pairs too, except
+        against an entity that keeps a local mask (:meth:`_collision_mask_peers`). Genesis recomputes the flag from
+        the morph when it loads a scene description, so a description Genesis exports keeps the zeroed bits but not
+        the cross-entity filter.
         """
-        if self.is_kinematic and getattr(self._options, "collision_link_patterns", None):
+        self._collision_kept_links = None
+        if not self.collision_link_patterns:
+            if self.collision_friction is not None:
+                friction = self.collision_friction
+                raise ValueError(
+                    f"Entity '{self.name}': collision_friction={friction} is set without collision_link_patterns, so "
+                    f"no geom would take it: it applies only to the links the collision mask keeps. Fix: name those "
+                    f"links with collision_link_patterns=[...], or set the friction without disabling any collision, "
+                    f"per link with default_geoms_friction={{'<link pattern>': {friction}}} or entity-wide with "
+                    f"material=RigidMaterialOptions(friction={friction})."
+                )
+            return
+        if self.is_kinematic:
             en.logger.warning(
-                f"collision_link_patterns {self._options.collision_link_patterns} ignored on kinematic entity "
-                f"'{self.name}': kinematic entities have no collision geometry to mask."
+                f"collision_link_patterns {self.collision_link_patterns} ignored on kinematic entity '{self.name}': "
+                f"kinematic entities have no collision geometry to mask."
             )
             return
-        kept = self._collision_mask_links()
-        if kept is None:
-            return
+        # `_match_geoms` resolves through `find_named_links_idx_local`, which needs a built scene, so its selection
+        # (`key_selects` against every link name) is made here, with its two causes reported apart.
+        every_link_name = [link.name for link in self._entity.links]
+        links_with_geoms = {geom.link.name for geom in self.geoms}
+        kept = set()
+        for pattern in self.collision_link_patterns:
+            matched_links = [name for name in every_link_name if key_selects(pattern, name, every_link_name)]
+            if not matched_links:
+                raise ValueError(
+                    f"Entity '{self.name}': `collision_link_patterns` pattern '{pattern}' matches no link; links: "
+                    f"{every_link_name}."
+                )
+            if not links_with_geoms.intersection(matched_links):
+                raise ValueError(
+                    f"Entity '{self.name}': `collision_link_patterns` pattern '{pattern}' matches links "
+                    f"{sorted(matched_links)} but none carry collision geoms; links with geoms: "
+                    f"{sorted(links_with_geoms)}."
+                )
+            kept.update(links_with_geoms.intersection(matched_links))
+        self._collision_kept_links = kept
         self._entity._is_local_collision_mask = False
-        for g in self._entity.geoms:
-            if g.link.name not in kept:
-                g.desc.contype = g.desc.conaffinity = 0
+        for geom in self.geoms:
+            if geom.link.name not in kept:
+                geom.desc.contype = geom.desc.conaffinity = 0
 
     def _collision_mask_peers(self) -> list[str]:
-        """The entities the links masked out by ``collision_link_patterns`` still collide with.
+        """The rigid entities with collision geoms that the links masked out can still pair with.
 
         Genesis' collider skips a cross-entity pair whose bits do not match only when neither entity has a local
         mask (``con_skip = (same_entity | ~has_local_mask) & (con_match == 0)``), and every MJCF or USD entity has
-        one unless it sets ``collision_link_patterns`` itself.
+        one unless it sets ``collision_link_patterns`` itself. The collider's other filters (fixed pairs, welds)
+        still apply, so a listed entity is a candidate partner rather than a certain contact.
         """
         return [
             name
             for name, entity in self._env.entities.items()
-            if entity is not self and getattr(getattr(entity, "_entity", None), "is_local_collision_mask", False)
+            if entity is not self
+            and isinstance(entity, RigidEntity)
+            and not entity.is_kinematic
+            and entity.geoms
+            and entity.entity.is_local_collision_mask
         ]
 
     def _report_collision_mask(self) -> None:
-        """Log which links collide, naming the entities the masked-out links still collide with."""
-        kept = self._collision_mask_links()
+        """Log which links collide, naming the entities the masked-out links can still pair with."""
+        kept = self._collision_kept_links
         if kept is None:
             return
-        n_links = len({g.link.name for g in self._entity.geoms})
+        n_links = len({geom.link.name for geom in self.geoms})
         message = f"[collision mask] '{self.name}': only links {sorted(kept)} collide ({len(kept)}/{n_links} links)"
         peers = self._collision_mask_peers()
         if peers:
-            message += f"; the other links still collide with {peers} (MJCF / USD, with no collision_link_patterns)"
+            message += f"; the other links can still pair with {peers} (MJCF / USD, with no collision_link_patterns)"
         en.logger.info(message + ".")
 
     @property
@@ -1538,14 +1551,9 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
                 self._env.set_sol_params(sol_params, geoms_idx=[geom.idx for geom in matched])
 
         # Before the per-link coefficients, so a `default_geoms_friction` pattern on a kept link wins.
-        if self.collision_friction is not None:
-            kept = self._collision_mask_links()
-            if kept is None:
-                raise ValueError(
-                    f"Entity '{self.name}': {collision_friction_without_mask_message(self.collision_friction)}"
-                )
+        if self.collision_friction is not None:  # `pre_build` refused it without kept links
             for geom in self.geoms:
-                if geom.link.name in kept:
+                if geom.link.name in self._collision_kept_links:
                     geom.set_friction(self.collision_friction)
 
         # The three per-geom friction coefficients: sliding (unitless), plus the opt-in torsional and

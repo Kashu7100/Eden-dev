@@ -303,24 +303,6 @@ def test_primitives_take_a_prebuilt_morph_override_and_file_entities_refuse_one(
         BoxOptions(size=(0.1, 0.1, 0.1), morph=42)
 
 
-@pytest.mark.parametrize(
-    "make",
-    [
-        lambda **kwargs: EntityOptions(file="robot.urdf", **kwargs),
-        lambda **kwargs: BoxOptions(size=(0.1, 0.1, 0.1), **kwargs),
-    ],
-    ids=["file", "primitive"],
-)
-def test_a_collision_friction_without_a_collision_mask_raises_naming_the_alternatives(make):
-    """Without a mask no geom takes it, and the build would otherwise go ahead at the asset's friction."""
-    with pytest.raises(
-        ValidationError,
-        match=r"collision_friction=2\.0 is set without collision_link_patterns.*"
-        r"material=RigidMaterialOptions\(friction=2\.0\).*default_geoms_friction",
-    ):
-        make(collision_friction=2.0)
-
-
 # ── grouped, entity and terrain validation ─────────────────────────────────────────────────────────
 
 

@@ -1302,7 +1302,8 @@ def mjcf_build(mjcf_assets):
                 ),
             )
         )
-    return env, [r.getMessage() for r in records if r.levelno >= 30]
+    messages = [r.getMessage() for r in records]
+    return env, [r.getMessage() for r in records if r.levelno >= 30], messages
 
 
 @pytest.fixture
@@ -1511,7 +1512,7 @@ def test_a_joint_actuatorfrcrange_seeds_the_effort_limit_and_an_override_wins(mj
 
 
 def test_declarations_that_match_the_asset_build_without_a_warning(mjcf_build):
-    env, warnings = mjcf_build
+    env, warnings, _ = mjcf_build
     assert [w for w in warnings if "is_fixed_base" in w] == []
     assert not env.entities["free_declared_free"].has_immobile_base
     assert env.entities["jointless_declared_fixed"].has_immobile_base
@@ -1585,12 +1586,13 @@ def test_mjcf_geoms_without_condim_parse_to_zero_spin_resistance(mjcf_env):
     assert _solver_by_link(mjcf_env, plain, "friction_rolling") == {"base": 0.0, "pad": 0.0}
 
 
-def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_env):
+def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_build):
     """Only the matched link collides, at ``collision_friction``; the other keeps its friction and loses its pairs.
 
     The mask used to be written to a geom attribute Genesis does not read, so it logged as applied and changed
     nothing, and ``collision_friction`` aborted the build.
     """
+    mjcf_env, _, messages = mjcf_build
     masked, box = mjcf_env.entities["masked_pads"], mjcf_env.entities["box"]
     assert _solver_by_link(mjcf_env, masked, "contype") == {"base": 0, "pad": 1}
     assert _solver_by_link(mjcf_env, masked, "conaffinity") == {"base": 0, "pad": 1}
@@ -1604,12 +1606,14 @@ def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_env):
 
     (box_geom,) = box.geoms
     assert candidates(box_geom) == {"base": False, "pad": True}
-    # An unmasked MJCF entity keeps its pairs with the masked-out link, and the build log names it as a peer.
+    # An unmasked MJCF entity keeps its pairs with the masked-out link, and the build log names it.
     plain_base = next(g for g in mjcf_env.entities["plain_pads"].geoms if g.link.name == "base")
     assert candidates(plain_base) == {"base": True, "pad": True}
-    peers = masked._collision_mask_peers()
-    assert "plain_pads" in peers
-    assert not {"box", "plane", "masked_pads"} & set(peers)
+    (report,) = [m for m in messages if m.startswith("[collision mask] 'masked_pads'")]
+    assert "only links ['pad'] collide (1/2 links)" in report
+    peers = report.split("can still pair with ")[1]
+    assert "'plain_pads'" in peers
+    assert not any(f"'{name}'" in peers for name in ("box", "plane", "masked_pads", "masked_box", "masked_marker"))
 
 
 def test_a_collision_mask_keeps_the_kept_geoms_own_bits_and_yields_to_a_link_friction(mjcf_env):
@@ -1627,28 +1631,21 @@ def test_a_collision_mask_keeps_the_kept_geoms_own_bits_and_yields_to_a_link_fri
     [
         (
             dict(collision_link_patterns=["pad", "nope_*"]),
-            r"'rig'.*collision_link_patterns pattern 'nope_\*' matches no link.*\['base', 'pad'\]",
+            r"'rig'.*`collision_link_patterns` pattern 'nope_\*' matches no link; links: \['base', 'pad'\]",
         ),
-        # A config mod assigns without validation, so the build checks again what construction checked.
-        (
-            dict(collision_friction=1.5, collision_link_patterns=None),
-            r"'rig'.*collision_friction=1\.5 is set without collision_link_patterns",
-        ),
+        (dict(collision_friction=1.5), r"'rig'.*collision_friction=1\.5 is set without collision_link_patterns"),
     ],
     ids=["unmatched-pattern", "friction-without-mask"],
 )
-def test_a_collision_mask_that_can_take_no_effect_raises_at_build(mjcf_assets, options, match):
-    rig = _two_link(mjcf_assets, collision_link_patterns=["pad"])
-    for name, value in options.items():
-        setattr(rig, name, value)
+def test_a_collision_mask_that_can_take_no_effect_raises_before_the_scene_builds(mjcf_assets, options, match):
     with pytest.raises(ValueError, match=match):
-        build_env(_config(plane=PlaneOptions(), rig=rig))
+        build_env(_config(plane=PlaneOptions(), rig=_two_link(mjcf_assets, **options)))
 
 
 @pytest.mark.parametrize("field", ["default_geoms_friction_torsional", "default_geoms_friction"])
 def test_geom_options_on_a_kinematic_entity_are_skipped_with_a_warning(mjcf_build, field):
     """Its solver builds visual geoms only; writing one used to abort post_build with an AttributeError."""
-    env, warnings = mjcf_build
+    env, warnings, _ = mjcf_build
     assert env.entities[f"marker_{field}"].is_kinematic
     assert any(field in w and f"'marker_{field}'" in w for w in warnings), warnings
 
@@ -1659,7 +1656,7 @@ def test_collision_vis_on_a_kinematic_entity_falls_back_to_visual_and_says_so(mj
     It used to abort ``scene.build()`` with an ``AttributeError``. The downgrade is render-time only, so
     ``env.config`` still round-trips what was asked for.
     """
-    env, warnings = mjcf_build
+    env, warnings, _ = mjcf_build
     assert env.entities["vis_marker"].entity.surface.vis_mode == "visual"
     assert env.entities["vis_block"].entity.surface.vis_mode == "collision"  # it has collision geoms
     assert env.config.scene_options.vis_marker.vis_mode == "collision"

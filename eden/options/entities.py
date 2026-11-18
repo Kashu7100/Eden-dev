@@ -220,17 +220,6 @@ def _has_own_value(options: BaseEntityOptions, name: str) -> bool:
 SolParamsType = tuple[float, float, float, float, float, float, float]
 
 
-def collision_friction_without_mask_message(friction: float) -> str:
-    """Why ``collision_friction`` without ``collision_link_patterns`` is refused, and what to set instead."""
-    return (
-        f"collision_friction={friction} is set without collision_link_patterns, so no geom would take it: it applies "
-        f"only to the links the collision mask keeps. Fix: name those links with collision_link_patterns=[...], or "
-        f"set the friction without disabling any collision, entity-wide with "
-        f"material=RigidMaterialOptions(friction={friction}) or per link with "
-        f"default_geoms_friction={{'<link pattern>': {friction}}}."
-    )
-
-
 def _validate_no_dofs_for_non_rigid_material(opts) -> None:
     """Raise ValueError if rigid-solver fields are set on a non-rigid (particle/FEM) entity.
 
@@ -414,15 +403,19 @@ class BaseEntityOptions(ConfigurableOptions):
         against the inner linkage. Applied before the scene is built (Genesis
         bakes the collision-pair list at build time). ``None`` keeps the morph's
         default per-geom collision. A pattern that matches no link with collision
-        geoms raises at build. On the rigid solver, the disabled links still
-        collide with an MJCF or USD entity that sets no
+        geoms raises at build. The kept geoms keep their own ``contype`` /
+        ``conaffinity``, which from then on filter pairs with other entities
+        too, not only within this one. On the rigid solver, the disabled links
+        still collide with an MJCF or USD entity that sets no
         ``collision_link_patterns`` of its own: Genesis reads that entity's
-        ``contype`` / ``conaffinity`` as a self-collision mask only.
+        ``contype`` / ``conaffinity`` as a self-collision mask only. The build
+        log names those entities.
     collision_friction : float, optional
         Friction coefficient applied to the geoms kept by
         ``collision_link_patterns`` (e.g. high pad friction for stable grasps),
         at build like ``default_geoms_friction``, whose patterns win on the
-        same link. Requires ``collision_link_patterns``.
+        same link. Requires ``collision_link_patterns`` (the build raises
+        without it).
     batch_fixed_verts : bool
         Whether fixed-geometry vertices are batched for per-env transforms.
     is_support_enabled : bool
@@ -560,11 +553,6 @@ class BaseEntityOptions(ConfigurableOptions):
     default_geoms_friction: dict[str, float] = {}
     default_geoms_friction_torsional: dict[str, float] = {}
     default_geoms_friction_rolling: dict[str, float] = {}
-
-    def model_post_init(self, context):
-        super().model_post_init(context)
-        if self.collision_friction is not None and not self.collision_link_patterns:
-            raise ValueError(collision_friction_without_mask_message(self.collision_friction))
 
     def _set_dofs_unactuated(self):
         """Set DOF fields to unactuated defaults."""
