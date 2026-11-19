@@ -18,9 +18,11 @@ Frames and orders, the part a hand-written buffer gets wrong:
   re-origins a free body onto. Quaternions are wxyz.
 - ``root_lin_vel`` is the world-frame velocity of that authored origin, and ``root_ang_vel`` the world-frame
   angular velocity. Neither is the free joint's DOF velocity, whose angular half is in the body frame.
-- A **fixed base** has a root pose to store only when it is built with ``batch_fixed_verts=True``: Genesis then
-  keeps its pose per env (a robot base or fixture placed differently in each row), otherwise one pose for every
-  env. It never has a root velocity. :func:`stores_root_pose` is the rule.
+- A **fixed base** has a root pose to store only when it is built with ``batch_fixed_verts=True``, which lets
+  Genesis pose it per env (a robot base or fixture placed differently in each row). It never has a root velocity.
+  :func:`stores_root_pose` is the rule. A restored row finds a base without a root where the scene reset puts it,
+  so :func:`capture_reset_states` refuses one that a captured env holds elsewhere (``docs/guides/entities.md``,
+  "Fixed, kinematic and invisible entities").
 - DOFs are stored **per joint name**, joint-major, for every non-free joint that carries DOFs
   (:attr:`RigidEntity.joints`). That is not ``dofs_name``, which is the *controlled* subset and omits a
   closed-loop gripper's passive followers. Values are the DOF state as Genesis holds it (``get_dofs_pos``):
@@ -568,6 +570,54 @@ def stores_root_pose(entity: RigidEntity) -> bool:
     return not entity.is_attached and bool(entity.entity.main_morph.batch_fixed_verts)
 
 
+#: How far a fixed base without a stored root may sit from its reset pose, in metres and in radians, and count as there.
+_RESET_POSE_ATOL = 1e-5
+#: How many envs :func:`_check_at_reset_pose` quotes before it counts the rest.
+_SHOWN_ENVS = 4
+
+
+def _check_at_reset_pose(env: EnvBase, entity: RigidEntity, envs_idx: torch.Tensor) -> None:
+    """Raise when a fixed base that a row stores no root for sits away from its reset pose in a captured env.
+
+    The reset pose is the one in ``env.reset_state``, which the scene reset restores per env, a group variant's
+    included.
+    """
+    from eden.utils.geom import quat_error_magnitude
+
+    reset_pos, reset_quat = entity.get_base_pose_in_state(env.reset_state, envs_idx)
+    pos, quat = entity.get_pos(envs_idx=envs_idx), entity.get_quat(envs_idx=envs_idx)
+    shift, turn = torch.linalg.norm(pos - reset_pos, dim=-1), quat_error_magnitude(quat, reset_quat)
+    away = torch.nonzero((shift > _RESET_POSE_ATOL) | (turn > _RESET_POSE_ATOL)).flatten().tolist()
+    if not away:
+        return
+
+    def fmt(values: torch.Tensor) -> str:
+        return f"({', '.join(f'{x:.6g}' for x in values.tolist())})"
+
+    env_ids = envs_idx.tolist()
+    authored_pos = entity.get_pos(envs_idx=envs_idx, relative=True)
+    authored_quat = entity.get_quat(envs_idx=envs_idx, relative=True)
+    shown = "; ".join(
+        f"env {env_ids[k]} at pos {fmt(authored_pos[k])} quat {fmt(authored_quat[k])}, {shift[k].item():.6g} m and "
+        f"{turn[k].item():.6g} rad off"
+        for k in away[:_SHOWN_ENVS]
+    )
+    more = f"; and {len(away) - _SHOWN_ENVS} more env(s)" if len(away) > _SHOWN_ENVS else ""
+    raise ValueError(
+        f"capture_reset_states: entity '{entity.name}' is fixed-base without batch_fixed_verts=True, so a reset-state "
+        "row stores no root pose for it and a restored row finds it where the scene reset puts it (env.reset_state). "
+        f"In {len(away)} captured env(s) it sits elsewhere (pose as get_pos(relative=True) / "
+        "get_quat(relative=True), then how far its base link is from the reset pose): "
+        f"{shown}{more}. It left the reset pose when set_pos / set_quat or RigidEntity.place_on_to moved it after the "
+        "build, in a RESET event too, and no env.reset of its env has put it back since. "
+        f"Fix: set batch_fixed_verts=True on '{entity.name}' so rows store and restore its pose per env, or, for one "
+        "pose in every env, author it with default_root_pos / default_root_quat. Moving it back to the reset pose "
+        "just before capturing is not a "
+        "fix: the captured joints and objects were set up against the moved entity, and a row would restore them "
+        "against the reset pose."
+    )
+
+
 def capture_reset_states(
     env: EnvBase,
     entities_name: Sequence[str],
@@ -581,6 +631,9 @@ def capture_reset_states(
     gripper's passive DOFs included. ``columns`` are task data for the same rows, copied like the states: a live
     tensor passed in (a command's buffer) does not drag the captured rows along when the env steps on. Not for the
     hot path: it reads Genesis state with ordinary getters.
+
+    Raises for a fixed base without a stored root that a captured env holds away from its reset pose (see the module
+    docstring).
     """
     from eden.entities.rigid import RigidEntity
     from eden.utils.geom import transform_by_quat
@@ -600,12 +653,15 @@ def capture_reset_states(
             )
         free_joint = free_base_joint(entity, consumer="capture_reset_states")
         root: dict[str, torch.Tensor] = {}
-        if free_joint is None and stores_root_pose(entity):
+        if free_joint is None and not stores_root_pose(entity):  # an immobile base whose row stores no root
+            if not entity.is_attached:  # a welded entity follows its parent link
+                _check_at_reset_pose(env, entity, envs_idx)
+        elif free_joint is None:  # a fixed base posed per env
             root = {
                 "root_pos": entity.get_pos(envs_idx=envs_idx, relative=True),
                 "root_quat": entity.get_quat(envs_idx=envs_idx, relative=True),
             }
-        elif free_joint is not None:
+        else:  # a free base
             authored_pos = entity.get_pos(envs_idx=envs_idx, relative=True)
             solver_pos, solver_quat = entity.get_pos(envs_idx=envs_idx), entity.get_quat(envs_idx=envs_idx)
             base_vel = entity.get_dofs_vel(dofs_idx_local=list(free_joint.dofs_idx_local), envs_idx=envs_idx)

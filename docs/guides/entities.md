@@ -842,9 +842,21 @@ frame-alignment correction a hand with non-default `up` / `front` needs.
 
 ## Fixed, kinematic and invisible entities
 
-- `is_fixed_base=True` pins the root link to the world (see the MJCF rule above).
+- `is_fixed_base=True` pins the root link to the world (see the MJCF rule above). Posing it per env needs
+  `batch_fixed_verts=True`: otherwise `set_pos` / `set_quat` raise on a subset of envs or on values that differ
+  per env, on the rigid solver and on Mochi. That check covers a base link with collision geoms.
+  A base link without geoms, such as the `world` root link Genesis gives an MJCF whose top bodies have no joint,
+  takes a per-env pose anyway (from the setters or from `place_on_to`). Reset states store no root for either
+  kind, so a restored row finds the entity where the scene reset puts it (`env.reset_state`, taken after the
+  STARTUP events, so a STARTUP placement is part of it). `capture_reset_states` raises when a captured env holds
+  it elsewhere: moved after that, and not reset since. A RESET event that moves it counts too, even one that writes
+  the same pose on every reset, since the capture compares with the reset state alone. Only the entities passed
+  to `capture_reset_states` are checked, so a moved table left out of the capture passes even when captured
+  objects rest on it. A RESET event that poses such an entity per env needs `batch_fixed_verts=True`, and the row
+  then decides that pose; `ResetFromStateBuffer` does not check it.
 - `material=KinematicMaterialOptions()` puts the entity in Genesis' kinematic solver: it is posed but not
-  simulated and has **no collision geometry**. Use it for goal ghosts and markers. `vis_mode="collision"` or
+  simulated and has **no collision geometry**. Use it for goal ghosts and markers. A fixed one therefore takes a
+  per-env pose without `batch_fixed_verts=True`, and the reset-state rule above applies to it. `vis_mode="collision"` or
   `"sdf"` on a kinematic entity falls back to its visual mesh with a warning, and `collision_link_patterns` and
   `is_support_enabled` are ignored on it.
 - `visualization=False` hides an entity from rendering while it still collides.
@@ -968,9 +980,9 @@ vertex-based solid, shell or rod. Solver settings (`MochiOptions`, precision, pe
     move carries a fixed link with collision geoms (the entity's own or an attached entity's) place every geom of the
     moved envs at once; other moves place theirs at the next step. As on the rigid solver, they raise when they would
     pose a fixed base link with collision geoms, of an entity built without `batch_fixed_verts=True`, on a subset of
-    envs or differently in different envs. A base link without geoms of such an entity (an MJCF world body with no
-    geom of its own) can be posed per env on both solvers, but reset states store no root for it, so
-    `capture_reset_states` does not keep that pose.
+    envs or differently in different envs. A base link without geoms is accepted per env on both solvers; see
+    [Fixed, kinematic and invisible entities](#fixed-kinematic-and-invisible-entities) for what reset states do with
+    it.
 
 ```python
 from eden.engine.solvers.mochi import MochiOptions

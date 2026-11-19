@@ -2748,6 +2748,50 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         """
         return self._entity.get_pos(envs_idx=envs_idx, relative=relative)
 
+    def get_base_pose_in_state(self, state, envs_idx=None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the base link's pose in a ``scene.get_state()`` snapshot, such as ``env.reset_state``.
+
+        The solver frame of ``get_pos()`` / ``get_quat()``, read from the snapshot's link arrays. Genesis names those
+        after the solver's data fields (``dyn_state.links.pos``) and lays them out ``(n_links, n_envs, ...)``.
+
+        Parameters
+        ----------
+        state : genesis SimState
+            A snapshot of the scene that holds this entity.
+        envs_idx : None | array_like, optional
+            The environment indices. If None, all environments are considered. Defaults to None.
+
+        Returns
+        -------
+        pos, quat : torch.Tensor, shapes (n_envs, 3) and (n_envs, 4)
+            The base-link position and wxyz quaternion, in Genesis' float dtype. Copies: writing into them leaves
+            ``state`` as it was.
+        """
+        if state.scene is not self.entity.scene:
+            raise ValueError(
+                f"RigidEntity.get_base_pose_in_state: the state was taken from another scene than the one that holds "
+                f"entity '{self.name}', so its link rows belong to other bodies. Fix: pass a scene.get_state() of "
+                f"the env that built '{self.name}', such as that env's env.reset_state."
+            )
+        solver_name = type(self.solver).__name__
+        keys = ("dyn_state.links.pos", "dyn_state.links.quat")
+        arrays = state.solvers[solver_name].arrays if solver_name in state.solvers else {}
+        missing = [key for key in keys if key not in arrays]
+        if missing:
+            raise RuntimeError(
+                f"RigidEntity.get_base_pose_in_state: entity '{self.name}' is in solver {solver_name}, but the state "
+                f"holds no {missing} for it (solvers in the state: {list(state.solvers)}). Genesis' checkpoint format "
+                "has changed. Fix: update get_base_pose_in_state in eden/entities/rigid.py to the arrays that "
+                "Genesis' Solver.data now names for the link poses."
+            )
+        i_l = self.entity.base_link_idx
+        rows = sanitize_envs_idx(envs_idx, self._env.num_envs)
+        # A copy: the snapshot's own rows are what every later reset restores.
+        pos, quat = (
+            torch.as_tensor(arrays[key][i_l], device=self.device)[rows].to(gs.tc_float, copy=True) for key in keys
+        )
+        return pos, quat
+
     def get_quat(self, envs_idx=None, *, relative: bool = False):
         """Return the quaternion of the entity's base link.
 
