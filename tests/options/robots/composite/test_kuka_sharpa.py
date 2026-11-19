@@ -127,7 +127,6 @@ def test_restricted_hand_limits_move_edens_view_but_not_the_joint_stops(env):
 
 
 def test_default_geoms_friction_raises_the_matched_links_only_and_keeps_every_link_colliding(env):
-    """Unlike ``collision_friction``, which also switches collision off outside ``collision_link_patterns``."""
     hand = env.entities["tuned_hand"]
     tips = [float(g.get_friction()) for g in hand.geoms if g.link.name in _TIPS]
     others = [float(g.get_friction()) for g in hand.geoms if g.link.name not in _TIPS]
@@ -138,5 +137,5 @@ def test_default_geoms_friction_raises_the_matched_links_only_and_keeps_every_li
 
 def test_a_friction_pattern_matching_no_link_raises_listing_the_links():
     hand = SharpaWave_L(is_fixed_base=False, default_geoms_friction={"nope_*": 1.5})
-    with pytest.raises(ValueError, match="patterns are matched"):
+    with pytest.raises(ValueError, match=r"`default_geoms_friction` pattern 'nope_\*' matches no link; links: \["):
         build_scene(robot=KukaSharpa(base_pos=_BASE_POS, hand=hand))

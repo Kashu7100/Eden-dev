@@ -20,6 +20,7 @@ robot, whichever order its parts' sends arrived in.
 from __future__ import annotations
 
 import os
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -43,7 +44,13 @@ class RigPart:
     parameters of each of its geoms in the env, an ``(n_geoms, 7)`` array of Genesis' ``(timeconst,
     dampratio, dmin, dmax, width, mid, power)`` -- MuJoCo's ``solref`` and ``solimp`` in one -- as
     stated, before any floor (see :meth:`MujocoRig._apply_contacts`); a body it does not name keeps
-    its asset's.
+    its asset's. ``links_name`` names the links Genesis built the part with: a body named there is a
+    link of its own (an MJCF keeps every body, a jointless pad included), and a body it does not name is
+    one Genesis merged into the link it hangs off (a URDF's fixed child), whose values it takes.
+    ``collisionless_links`` names the links whose every geom the env built with ``contype = conaffinity
+    = 0`` (those ``collision_link_patterns`` masked out); their geoms get the same. MuJoCo filters every
+    pair by those bits, so such a geom touches nothing, where Genesis still pairs it with an MJCF or USD
+    entity that keeps a local collision mask.
     """
 
     name: str
@@ -51,6 +58,7 @@ class RigPart:
     dofs_name: list[str]
     pos: np.ndarray
     quat: np.ndarray
+    links_name: set[str]
     parent: str | None = None
     parent_body: str | None = None
     floating: bool = False
@@ -60,6 +68,7 @@ class RigPart:
     friction: float | None = None
     link_friction: dict[str, float] = field(default_factory=dict)
     link_sol_params: dict[str, np.ndarray] = field(default_factory=dict)
+    collisionless_links: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -485,10 +494,11 @@ class MujocoRig:
     def _apply_contacts(self) -> None:
         """Every geom's contact as the env simulates it: sliding friction, solver parameters, and how a pair mixes them.
 
-        A part geom takes its link's friction (``link_friction``, else the part's ``friction``) and
-        solver parameters (``link_sol_params``); a body with no joint of its own (a fingertip's
-        elastomer pad) takes its parent's, as Genesis merges a fixed child into the link it hangs
-        off. A prop's geoms take the prop's, and the floor the ground's.
+        A part geom takes its link's friction (``link_friction``, else the part's ``friction``), solver
+        parameters (``link_sol_params``) and, on a link the env built without collision
+        (``collisionless_links``), ``contype = conaffinity = 0``; a body with no joint of its own that
+        Genesis did not keep as a link (``links_name``: a URDF's fixed child) takes its parent's, as Genesis
+        merges it into the link it hangs off. A prop's geoms take the prop's, and the floor the ground's.
 
         Genesis mixes a contact's solver parameters as the plain mean of its two geoms' and its
         friction as their max, which MuJoCo does too only while neither geom outranks the other
@@ -514,31 +524,44 @@ class MujocoRig:
         model.geom_priority[:] = 0
         model.geom_solmix[:] = 1.0
 
-        def genesis_link(body: int, prefix: str, table: dict) -> str | None:
+        def genesis_link(body: int, part: RigPart, table: Collection[str]) -> str | None:
             """The link ``table`` names for ``body``: the body itself, or the fixed ancestor Genesis merges it into."""
+            prefix = f"{part.name}/"
             while names[body].startswith(prefix):
                 link = names[body][len(prefix) :]
                 if link in table:
                     return link
-                if model.body_jntnum[body] > 0:
+                if link in part.links_name:
                     return None
                 body = int(model.body_parentid[body])
             return None
 
         link_geoms: dict[tuple[str, str], list[int]] = {}
+        collisionless: set[str] = set()
         for geom in range(model.ngeom):
             body = int(model.geom_bodyid[geom])
             part = next((p for p in self.parts.values() if names[body].startswith(f"{p.name}/")), None)
             if part is None:
                 continue
-            prefix = f"{part.name}/"
-            link = genesis_link(body, prefix, part.link_friction)
+            # A geom that touches nothing needs no contact parameters, and checking its own against the env's
+            # would only warn about a link that cannot collide.
+            if (link := genesis_link(body, part, part.collisionless_links)) is not None:
+                model.geom_contype[geom] = model.geom_conaffinity[geom] = 0
+                collisionless.add(f"{part.name}/{link}")
+                continue
+            link = genesis_link(body, part, part.link_friction)
             friction = part.friction if link is None else part.link_friction[link]
             if friction is not None:
                 model.geom_friction[geom, 0] = float(friction)
-            link = genesis_link(body, prefix, part.link_sol_params)
+            link = genesis_link(body, part, part.link_sol_params)
             if link is not None:
                 link_geoms.setdefault((part.name, link), []).append(geom)
+        if collisionless:
+            en.logger.info(
+                f"[deploy] MuJoCo rig: the geoms of {sorted(collisionless)}, which collision_link_patterns disabled, "
+                "collide with nothing here; in Genesis they still pair with the MJCF / USD entities the env's "
+                "'[collision mask]' line names."
+            )
         for (part, link), geoms in link_geoms.items():
             self._set_sol_params(geoms, self.parts[part].link_sol_params[link], f"{part}/{link}")
         for name, prop in self.props.items():

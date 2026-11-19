@@ -643,8 +643,15 @@ contact width sees the full capacity.
   and the other's `conaffinity` share a set bit.
 - `collision_link_patterns` keeps collision only on the links matching the patterns, and disables it on every
   other link, before the scene is built. The composite rigs use `collision_link_patterns=[".*pad"]` on the
-  Robotiq 2F85 so objects are pinched between the pads instead of wedged against the inner linkage.
-  `collision_friction` sets the friction of the geoms it keeps.
+  Robotiq 2F85 so objects are pinched between the pads instead of wedged against the inner linkage. That holds
+  for primitive, URDF and mesh-file objects, but not for MJCF or USD ones. On the rigid solver, the disabled links
+  still collide with an MJCF or USD entity that sets no `collision_link_patterns` itself: Genesis reads that
+  entity's `contype` / `conaffinity` as a self-collision mask, and skips a pair across two entities on their bits
+  only when neither has one. A line in the build log, starting `[collision mask]`, names those entities: a warning
+  with a fix when one of them can move into the masked links (it has DOFs of its own: an object to grasp, a door),
+  info when all are static scenery or the entities this one is welded into. The
+  kept geoms keep their own bits, which from then on filter pairs with other entities too. To set the kept links'
+  friction, name them in `default_geoms_friction` (below).
 
 A kinematic entity has no collision geometry, so these options are ignored on it with a warning.
 
@@ -659,8 +666,7 @@ Check this when matching another simulator's grasp behaviour. The same rule appl
 coefficients below.
 
 Set friction entity-wide with `material=RigidMaterialOptions(friction=...)`, or per link pattern with
-`default_geoms_friction={pattern: value}`, which is applied at build and keeps every link colliding. Prefer the
-latter over `collision_friction`, which only covers the geoms `collision_link_patterns` keeps.
+`default_geoms_friction={pattern: value}`, which is applied at build and leaves collision as it is.
 
 ### Torsional and rolling friction are opt-in, and their strength is per geom
 

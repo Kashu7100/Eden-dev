@@ -1,13 +1,18 @@
 # Per-geom collision mask
 
-Examples for `EntityOptions.collision_link_patterns` / `collision_friction` — a
+Examples for `EntityOptions.collision_link_patterns` — a
 declarative way to restrict an entity's collisions to a subset of its links.
 
 When set, only geoms on links whose name matches one of the patterns keep
 collision; every other link's geoms are disabled (`contype = conaffinity = 0`),
 applied in `RigidEntity.pre_build()` before `scene.build()` (Genesis bakes the
-collision-pair list at build time). `collision_friction` optionally overrides
-the friction of the kept geoms.
+collision-pair list at build time). To set the kept links' friction, name them
+in `default_geoms_friction`, which is applied at build.
+
+On the rigid solver, the disabled links still collide with an MJCF or USD
+entity that sets no `collision_link_patterns` of its own; the build log names
+those entities. The mask filters primitives, terrains, URDF and mesh-file
+entities.
 
 The motivating use case: a parallel-jaw gripper (Robotiq 2F85) should grasp
 objects at its **fingertip pads**, not wedge them against its inner
@@ -15,8 +20,8 @@ linkage/palm. `collision_link_patterns=[".*pad"]` enforces exactly that.
 
 ```python
 en.robots.Robotiq2f85(
-    collision_link_patterns=[".*pad"],   # only left_pad / right_pad collide
-    collision_friction=2.0,              # firmer pad contact for stable grasps
+    collision_link_patterns=[".*pad"],      # only left_pad / right_pad collide
+    default_geoms_friction={".*pad": 2.0},  # firmer pad contact for stable grasps
 )
 ```
 

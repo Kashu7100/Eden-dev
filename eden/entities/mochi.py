@@ -120,6 +120,10 @@ class MochiRigidEntity(RigidEntity):
     def _apply_constraint_sol_params(self) -> None:
         """No-op: penalty contact has no constraint-solver parameters (the options are rejected up front)."""
 
+    def _collision_mask_peers(self) -> list[str]:
+        """None: the MochiSolver filters every pair by its ``contype`` / ``conaffinity`` bits, with no local masks."""
+        return []
+
     def set_mass(self, mass):
         raise NotImplementedError(
             f"MochiRigidEntity '{self.name}': link masses are fixed at build by the MochiSolver. Set "

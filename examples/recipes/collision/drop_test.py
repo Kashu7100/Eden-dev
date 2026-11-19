@@ -50,7 +50,6 @@ def main():
         # place while the cube falls onto it, so the test isolates the mask effect.
         material=RigidMaterialOptions(gravity_compensation=1.0),
         collision_link_patterns=[".*pad"] if args.mask else None,
-        collision_friction=2.0 if args.mask else None,
     )
     # Cube dropped from above the gripper body (not between the pads).
     cube = BoxOptions(size=(2 * _CUBE_HALF,) * 3, fixed=False, default_root_pos=(0.0, 0.0, 0.35))

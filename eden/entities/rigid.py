@@ -54,7 +54,7 @@ from eden.utils.misc import (
     is_env_mask,
     sanitize_envs_idx,
 )
-from eden.utils.string import resolve_matching_names, resolve_matching_names_values
+from eden.utils.string import key_selects, resolve_matching_names, resolve_matching_names_values
 
 if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity import RigidGeom, RigidJoint
@@ -604,6 +604,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
     default_geoms_friction: dict[str, float] = {}
     default_geoms_friction_torsional: dict[str, float] = {}
     default_geoms_friction_rolling: dict[str, float] = {}
+    collision_link_patterns: list[str] | None = None
 
     is_articulated: bool = False
     is_actuated: bool = False
@@ -925,55 +926,136 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
             )
 
     def _apply_collision_link_mask(self) -> None:
-        """Restrict collision to geoms on links matching ``collision_link_patterns``.
+        """Disable collision on every geom outside the links ``collision_link_patterns`` keeps.
 
-        Runs after the entity is added to the scene but before ``scene.build()``,
-        because Genesis bakes the collision-pair candidate list from per-geom
-        ``contype``/``conaffinity`` at build time. Geoms on matching links keep
-        collision (``contype = conaffinity = 1``, optionally with
-        ``collision_friction``); every other link's geoms are disabled
-        (``contype = conaffinity = 0``).
+        Runs after the entity is added to the scene but before ``scene.build()``, because Genesis bakes the
+        collision-pair candidate list from per-geom ``contype``/``conaffinity`` at build time and offers no setter
+        for them. So the geom's description is written, which ``RigidGeom.contype``/``conaffinity`` return and the
+        collider and the solver read at build. Geoms on kept links keep their own bits; the others get
+        ``contype = conaffinity = 0``.
 
-        Genesis defaults ``is_local_collision_mask=True`` for MJCF entities, which
-        makes ``contype``/``conaffinity`` a *local self-collision* mask only — so
-        zeroing them would NOT stop collisions with other entities (e.g. a grasped
-        cube). We set it ``False`` so the mask filters cross-entity pairs (see
-        ``collider.py``: ``con_skip = (same_entity | ~has_local_mask) & (con_match == 0)``).
+        Genesis gives an MJCF or USD entity a local collision mask, which filters pairs within the entity only, so
+        zeroing the bits would not stop a collision with a grasped cube. Clearing the private
+        ``_is_local_collision_mask`` (Genesis has no setter) makes the mask filter cross-entity pairs too, except
+        against an entity that keeps a local mask (:meth:`_collision_mask_peers`). Genesis recomputes the flag from
+        the morph when it loads a scene description, so a description Genesis exports keeps the zeroed bits but not
+        the cross-entity filter.
         """
-        patterns = getattr(self._options, "collision_link_patterns", None)
-        if not patterns:
-            return
         if self.is_kinematic:
-            en.logger.warning(
-                f"collision_link_patterns {patterns} ignored on kinematic entity '{self.name}': "
-                f"kinematic entities have no collision geometry to mask."
-            )
+            if self.collision_link_patterns:
+                en.logger.warning(
+                    f"collision_link_patterns {self.collision_link_patterns} ignored on kinematic entity "
+                    f"'{self.name}': kinematic entities have no collision geometry to mask."
+                )
             return
-        geoms = self._entity.geoms
-        unique_links = sorted({g.link.name for g in geoms})
-        _, matched = resolve_matching_names(patterns, unique_links, preserve_order=True)
-        keep_links = set(matched)
-        if not keep_links:
-            en.logger.warning(
-                f"collision_link_patterns {patterns} matched no links on '{self.name}' "
-                f"(links: {unique_links}); leaving collision unchanged."
-            )
+        if not self.collision_link_patterns:
             return
-        # Treat contype/conaffinity as a global (cross-entity) filter, not a local one.
+        kept = {
+            geom.link.name
+            for pattern in self.collision_link_patterns
+            for geom in self._match_geoms("collision_link_patterns", pattern)
+        }
         self._entity._is_local_collision_mask = False
-        fric = self._options.collision_friction
-        for g in geoms:
-            if g.link.name in keep_links:
-                g._contype = 1
-                g._conaffinity = 1
-                if fric is not None:
-                    g.set_friction(fric)
-            else:
-                g._contype = 0
-                g._conaffinity = 0
-        en.logger.info(
-            f"[collision mask] '{self.name}': only links {sorted(keep_links)} collide "
-            f"({len(keep_links)}/{len(unique_links)} links)."
+        for geom in self.geoms:
+            if geom.link.name not in kept:
+                geom.desc.contype = geom.desc.conaffinity = 0
+
+    def _collision_mask_peers(self) -> list[str]:
+        """The rigid entities with collision geoms that the links masked out can still pair with.
+
+        Genesis' collider skips a cross-entity pair whose bits do not match only when neither entity has a local
+        mask (``con_skip = (same_entity | ~has_local_mask) & (con_match == 0)``), and every MJCF or USD entity has
+        one unless it sets ``collision_link_patterns`` itself. The collider's other filters (fixed pairs, welds)
+        still apply, so a listed entity is a candidate partner rather than a certain contact.
+        """
+        return [
+            name
+            for name, entity in self._env.entities.items()
+            if entity is not self
+            and isinstance(entity, RigidEntity)
+            and not entity.is_kinematic
+            and entity.geoms
+            and entity.entity.is_local_collision_mask
+        ]
+
+    @property
+    def collisionless_links_name(self) -> set[str]:
+        """The links with collision geoms whose ``contype`` and ``conaffinity`` are all zero.
+
+        On an MJCF, URDF or USD entity these are the links ``collision_link_patterns`` disabled: those parsers build an
+        asset geom with zero bits as a visual geom. A mesh-file entity configured with ``contype = conaffinity = 0``
+        lists all its links (a primitive so configured builds no collision geom). Such a geom pairs only with an MJCF
+        or USD entity that keeps a local mask (:meth:`_collision_mask_peers`). Empty on a kinematic entity, which has
+        no collision geoms.
+        """
+        if self.is_kinematic:
+            return set()
+        colliding = {geom.link.name for geom in self.geoms if geom.contype or geom.conaffinity}
+        return {geom.link.name for geom in self.geoms} - colliding
+
+    def _report_collision_mask(self) -> None:
+        """Log which links collide, and warn when a peer the masked-out links still pair with can move into them.
+
+        A peer with DOFs of its own outside this entity's attachment tree (an object to grasp, a door's handle) is what
+        the mask exists to keep off the masked links. Static scenery (a robosuite pedestal, a bin) and the entities
+        this one is welded into (a Droid's arm) are peers on every build of their scene, so they alone stay at info.
+        """
+        if not self.collision_link_patterns or self.is_kinematic:
+            return
+        links = {geom.link.name for geom in self.geoms}
+        masked = self.collisionless_links_name
+        if not masked:
+            en.logger.info(
+                f"[collision mask] '{self.name}': collision_link_patterns keeps every link with geoms, so nothing is "
+                f"masked; the geoms' own bits now filter pairs with other entities too."
+            )
+            return
+        kept = links - masked
+        message = f"[collision mask] '{self.name}': only links {sorted(kept)} collide ({len(kept)}/{len(links)} links)"
+        peers = self._collision_mask_peers()
+        if peers:
+            message += f"; the other links can still pair with {peers} (MJCF / USD, with no collision_link_patterns)"
+
+        def tree_root(entity: Entity) -> Entity:
+            while getattr(entity, "attachment_parent", None) is not None:
+                entity = entity.attachment_parent
+            return entity
+
+        # A tree moves if any entity in it has DOFs: a jointless body welded to another robot's flange moves too.
+        roots = {name: tree_root(entity) for name, entity in self._env.entities.items()}
+        moving_roots = {
+            id(roots[name])
+            for name, entity in self._env.entities.items()
+            if isinstance(entity, RigidEntity) and not entity.is_kinematic and entity.n_dofs > 0
+        }
+        own_root = tree_root(self)
+        movers = [name for name in peers if roots[name] is not own_root and id(roots[name]) in moving_roots]
+        if not movers:
+            en.logger.info(message + ".")
+            return
+        en.logger.warning(
+            f"{message}. {movers} can move into the masked links. Fix: {self._collision_mask_fix(movers)}"
+        )
+
+    def _collision_mask_fix(self, movers: list[str]) -> str:
+        """How to make ``movers`` stop pairing with the masked links, as config the caller can type."""
+        from eden.options.entities import BaseEntityOptions
+
+        scene = self._env.config.scene_options
+        # A composite's parts are entities of their own, but their options sit inside the composite's entry, which
+        # is no entity's options (its primary part shares its name).
+        top = [name for name in movers if isinstance(getattr(scene, name, None), BaseEntityOptions)]
+        parts = [name for name in movers if name not in top]
+        ways = []
+        if top:
+            entries = ", ".join(f"{name}: {{collision_link_patterns: ['.*']}}" for name in top)
+            ways.append(f'for {top}, --override "scene_options: {{{entries}}}"')
+        if parts:
+            ways.append(f"for the composite parts {parts}, the same field on each part's options inside its rig")
+        return (
+            f"give them collision_link_patterns=['.*'], a mask that keeps every link and makes their MJCF / USD bits "
+            f"filter pairs across entities ({'; '.join(ways)}), or load them from a URDF or mesh file. Setting their "
+            f"contype / conaffinity does not do it: Genesis reads an MJCF / USD entity's bits as a self-collision mask."
         )
 
     @property
@@ -1007,6 +1089,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         self._apply_dofs_spring_ref(is_kinematic)
         self._apply_constraint_sol_params()
         self._apply_variant_densities()
+        self._report_collision_mask()
 
         # Set initial root pose. Skipped for a welded child: ``attach`` already consumed its
         # ``default_root_pos``/``_quat`` as the mounting transform and made its world pose FK
@@ -1521,19 +1604,27 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
     def _match_geoms(
         self, option_name: str, pattern: str, geoms: list[RigidGeom] | None = None, scope: str = ""
     ) -> list[RigidGeom]:
-        """Collision geoms among ``geoms`` (default: all) on the links matching ``pattern``; raises if none carry geoms.
+        """Collision geoms among ``geoms`` (default: all) on the links ``pattern`` selects; raises if there are none.
 
-        ``scope`` names the variants ``geoms`` belong to, for the error.
+        ``scope`` names the variants ``geoms`` belong to, for the error. It reads only the entity's links and geoms, so
+        the collision mask calls it before the build too. A pattern selects links with :func:`key_selects`, as
+        :meth:`find_named_links_idx_local` does.
         """
         geoms = self.geoms if geoms is None else geoms
-        link_names, _ = self.find_named_links_idx_local(pattern)
-        matched_links = set(link_names)
+        every_link_name = [link.name for link in self._entity.links]
+        link_name_set = set(every_link_name)
+        matched_links = {name for name in every_link_name if key_selects(pattern, name, link_name_set)}
+        if not matched_links:
+            raise ValueError(
+                f"Entity '{self.name}': `{option_name}` pattern '{pattern}' matches no link; links: "
+                f"{every_link_name}. Fix: correct the pattern to name one of those links, or remove it."
+            )
         matched = [g for g in geoms if g.link.name in matched_links]
         if not matched:
             raise ValueError(
-                f"Entity '{self.name}': `{option_name}` pattern '{pattern}' matches "
-                f"links {sorted(matched_links)} but none carry collision geoms{scope}; links with geoms: "
-                f"{sorted({g.link.name for g in geoms})}."
+                f"Entity '{self.name}': `{option_name}` pattern '{pattern}' matches links {sorted(matched_links)} but "
+                f"none carry collision geoms{scope}; links with geoms: {sorted({g.link.name for g in geoms})}. Fix: "
+                f"name one of the links with geoms, or remove the pattern."
             )
         return matched
 

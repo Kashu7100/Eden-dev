@@ -5,9 +5,11 @@ Each section shares one module-scoped scene; a test that moves an entity resets 
 
 from __future__ import annotations
 
+import ast
 import gc
 import math
 import os
+import re
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -23,7 +25,7 @@ from eden.options.materials import KinematicMaterialOptions, RigidMaterialOption
 from eden.options.actuators import Unitree5020_16_DOUBLE, Unitree7520_14, Unitree7520_22
 from eden.options.robots import FrankaEmikaPanda, FrankaHand, FrankaResearch3, Robotiq2f85
 from eden.options.robots.unitree_g1 import G1Dofs29
-from eden.utils.configs import EdenConfig
+from eden.utils.configs import EdenConfig, overrides_from_str
 from eden.utils.geom import align_up_and_front
 from eden.utils.misc import DofPermutation, DofRuns, get_gs_assets_dir
 from tests.entities.conftest import HAND_STL, assert_quat_close, captured_eden_logs, euler_quat, to_np
@@ -1167,6 +1169,7 @@ _TWO_LINK_MJCF = """<mujoco model="two_link"><worldbody>
       <geom name="pad_geom" type="box" size="0.02 0.02 0.02"/></body></body>
 </worldbody></mujoco>"""
 _TORSIONAL, _ROLLING, _MATERIAL_TORSIONAL = 0.02, 0.003, 0.001
+_PAD_FRICTION, _OWN_BITS = 1.7, 0b10
 
 _FREE_DOFS = list(range(6))
 _STABILITY_DAMPING = 2e-4
@@ -1269,6 +1272,18 @@ def mjcf_build(mjcf_assets):
                         default_geoms_friction_torsional={"pad": _TORSIONAL},
                     ),
                     plain_pads=_two_link(asset),
+                    masked_pads=_two_link(
+                        asset, collision_link_patterns=["pad"], default_geoms_friction={"pad": _PAD_FRICTION}
+                    ),
+                    masked_peer=_two_link(asset, collision_link_patterns=["pad"]),
+                    all_kept=_two_link(asset, collision_link_patterns=[".*"]),
+                    masked_box=BoxOptions(
+                        size=(0.1, 0.1, 0.1),
+                        default_root_pos=(0.6, 0.0, 0.05),
+                        contype=_OWN_BITS,
+                        conaffinity=_OWN_BITS,
+                        collision_link_patterns=["box_baselink"],
+                    ),
                     # A kinematic entity has no collision geoms, so a geom option cannot be written there.
                     **{
                         f"marker_{field}": BoxOptions(
@@ -1287,7 +1302,8 @@ def mjcf_build(mjcf_assets):
                 ),
             )
         )
-    return env, [r.getMessage() for r in records if r.levelno >= 30]
+    messages = [r.getMessage() for r in records]
+    return env, [r.getMessage() for r in records if r.levelno >= 30], messages
 
 
 @pytest.fixture
@@ -1496,7 +1512,7 @@ def test_a_joint_actuatorfrcrange_seeds_the_effort_limit_and_an_override_wins(mj
 
 
 def test_declarations_that_match_the_asset_build_without_a_warning(mjcf_build):
-    env, warnings = mjcf_build
+    env, warnings, _ = mjcf_build
     assert [w for w in warnings if "is_fixed_base" in w] == []
     assert not env.entities["free_declared_free"].has_immobile_base
     assert env.entities["jointless_declared_fixed"].has_immobile_base
@@ -1570,10 +1586,104 @@ def test_mjcf_geoms_without_condim_parse_to_zero_spin_resistance(mjcf_env):
     assert _solver_by_link(mjcf_env, plain, "friction_rolling") == {"base": 0.0, "pad": 0.0}
 
 
+def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_build):
+    """Only the matched link collides, at its ``default_geoms_friction``; the other link loses its pairs.
+
+    The mask used to be written to a geom attribute Genesis does not read, so it logged as applied and changed
+    nothing.
+    """
+    mjcf_env, warnings, _ = mjcf_build
+    masked, box = mjcf_env.entities["masked_pads"], mjcf_env.entities["box"]
+    assert _solver_by_link(mjcf_env, masked, "contype") == {"base": 0, "pad": 1}
+    assert _solver_by_link(mjcf_env, masked, "conaffinity") == {"base": 0, "pad": 1}
+    assert _solver_by_link(mjcf_env, masked, "friction") == {"base": 1.0, "pad": pytest.approx(_PAD_FRICTION)}
+
+    # Genesis exposes the candidate pairs it built from those bits only through this private table.
+    pair_idx = mjcf_env.rigid_solver.collider._collision_pair_idx
+
+    def candidates(other_geom):
+        return {g.link.name: bool(pair_idx[tuple(sorted((g.idx, other_geom.idx)))] >= 0) for g in masked.geoms}
+
+    (box_geom,) = box.geoms
+    assert candidates(box_geom) == {"base": False, "pad": True}
+    # An unmasked MJCF entity keeps its pairs with the masked-out link, and the build log names it.
+    plain_base = next(g for g in mjcf_env.entities["plain_pads"].geoms if g.link.name == "base")
+    assert candidates(plain_base) == {"base": True, "pad": True}
+    # A peer with DOFs of its own, free (`plain_pads`) or articulated on a fixed base (`mixed`), can move into the
+    # masked links, so the report is a warning with a fix that names those; static scenery is only listed.
+    (report,) = [m for m in warnings if m.startswith("[collision mask] 'masked_pads'")]
+    assert "only links ['pad'] collide (1/2 links)" in report
+    peers = report.split("can still pair with ")[1].split(" (MJCF")[0]
+    movers = re.search(r"\. (\[.*?\]) can move into the masked links\. Fix: ", report).group(1)
+    assert all(f"'{name}'" in peers for name in ("plain_pads", "mixed", "jointless_declared_fixed"))
+    assert "'plain_pads'" in movers and "'mixed'" in movers and "'jointless_declared_fixed'" not in movers
+    assert "collision_link_patterns=['.*']" in report and "contype / conaffinity does not do it" in report
+    # The fix is typed as given: its override parses, names every mover, and validates against the config.
+    override = overrides_from_str(re.search(r'--override "([^"]+)"', report).group(1))
+    names = ast.literal_eval(movers)
+    assert override == {"scene_options": {name: {"collision_link_patterns": [".*"]} for name in names}}
+    fixed = mjcf_env.config.with_overrides_from_dict(override)
+    assert all(getattr(fixed.scene_options, name).collision_link_patterns == [".*"] for name in names)
+    # Primitives have no local mask, and a masked MJCF entity (`masked_peer`) gave its up.
+    assert not any(f"'{name}'" in peers for name in ("box", "plane", "masked_box", "masked_peer", "masked_marker"))
+
+
+def test_the_links_a_collision_mask_disabled_are_read_off_the_built_bits(mjcf_env):
+    """Empty without a mask, and on a kinematic entity, which has no collision geoms to read."""
+    assert mjcf_env.entities["masked_pads"].collisionless_links_name == {"base"}
+    assert mjcf_env.entities["plain_pads"].collisionless_links_name == set()
+    assert mjcf_env.entities["masked_marker"].collisionless_links_name == set()
+
+
+def test_a_collision_mask_that_keeps_every_link_masks_nothing_and_lists_no_peers(mjcf_build):
+    """What the warning's fix sets on a peer: its report must not warn about that peer's own neighbours."""
+    _, warnings, messages = mjcf_build
+    (report,) = [m for m in messages if m.startswith("[collision mask] 'all_kept'")]
+    assert "keeps every link with geoms, so nothing is masked" in report
+    assert not any(w.startswith("[collision mask] 'all_kept'") for w in warnings)
+
+
+def test_a_collision_mask_keeps_the_kept_geoms_own_bits(mjcf_env):
+    """It only disables collision; it does not reset the kept geoms' bits to the default."""
+    assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_box"], "contype") == {"box_baselink": _OWN_BITS}
+    assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_box"], "conaffinity") == {"box_baselink": _OWN_BITS}
+
+
+# A jointed body with no geom, so Genesis keeps it as a link with nothing to collide.
+_HOLLOW_MJCF = """<mujoco model="hollow"><worldbody>
+  <body name="base" pos="0 0 0.5"><freejoint/><geom type="box" size="0.05 0.05 0.05"/>
+    <body name="frame" pos="0.1 0 0"><joint name="frame_hinge" axis="0 0 1"/>
+      <inertial pos="0 0 0" mass="0.01" diaginertia="1e-5 1e-5 1e-5"/></body></body>
+</worldbody></mujoco>"""
+
+
+@pytest.mark.parametrize(
+    "patterns, match",
+    [
+        (
+            ["base", "nope_*"],
+            r"'rig'.*`collision_link_patterns` pattern 'nope_\*' matches no link; links: \['base', 'frame'\]\. "
+            r"Fix: correct the pattern",
+        ),
+        (
+            ["base", "fra.*"],
+            r"'rig'.*`collision_link_patterns` pattern 'fra\.\*' matches links \['frame'\] but none carry collision "
+            r"geoms; links with geoms: \['base'\]\. Fix: name one of the links with geoms",
+        ),
+    ],
+    ids=["no-link", "no-geoms"],
+)
+def test_a_collision_mask_pattern_that_can_keep_nothing_raises_before_the_scene_builds(tmp_path, patterns, match):
+    (asset := tmp_path / "hollow.xml").write_text(_HOLLOW_MJCF)
+    rig = EntityOptions(file=str(asset), is_articulated=True, collision_link_patterns=patterns)
+    with pytest.raises(ValueError, match=match):
+        build_env(_config(plane=PlaneOptions(), rig=rig))
+
+
 @pytest.mark.parametrize("field", ["default_geoms_friction_torsional", "default_geoms_friction"])
 def test_geom_options_on_a_kinematic_entity_are_skipped_with_a_warning(mjcf_build, field):
     """Its solver builds visual geoms only; writing one used to abort post_build with an AttributeError."""
-    env, warnings = mjcf_build
+    env, warnings, _ = mjcf_build
     assert env.entities[f"marker_{field}"].is_kinematic
     assert any(field in w and f"'marker_{field}'" in w for w in warnings), warnings
 
@@ -1584,7 +1694,7 @@ def test_collision_vis_on_a_kinematic_entity_falls_back_to_visual_and_says_so(mj
     It used to abort ``scene.build()`` with an ``AttributeError``. The downgrade is render-time only, so
     ``env.config`` still round-trips what was asked for.
     """
-    env, warnings = mjcf_build
+    env, warnings, _ = mjcf_build
     assert env.entities["vis_marker"].entity.surface.vis_mode == "visual"
     assert env.entities["vis_block"].entity.surface.vis_mode == "collision"  # it has collision geoms
     assert env.config.scene_options.vis_marker.vis_mode == "collision"
