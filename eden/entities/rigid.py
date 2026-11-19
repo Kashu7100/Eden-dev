@@ -605,7 +605,6 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
     default_geoms_friction_torsional: dict[str, float] = {}
     default_geoms_friction_rolling: dict[str, float] = {}
     collision_link_patterns: list[str] | None = None
-    collision_friction: float | None = None
     # The links `collision_link_patterns` keeps, resolved in `pre_build`; None without a mask.
     _collision_kept_links: set[str] | None = None
 
@@ -834,7 +833,6 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         super().pre_build()
         self._refuse_variant_density_without_density_mass()
         self._validate_opt_in_friction_axes()
-        self._refuse_collision_friction_without_mask()
         self._apply_collision_link_mask()
 
     def _downgrade_kinematic_collision_vis_mode(self) -> None:
@@ -929,23 +927,6 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
                 f"constraint axis the coefficient scales, or drop the coefficient."
             )
 
-    def _refuse_collision_friction_without_mask(self) -> None:
-        """Raise if ``collision_friction`` is set without ``collision_link_patterns``, which no geom would take.
-
-        Checked here rather than at options validation, so a config mod that assigns either field is caught too. A
-        kinematic entity is left to the warn-and-skip of :meth:`_apply_constraint_sol_params`.
-        """
-        friction = self.collision_friction
-        if friction is None or self.collision_link_patterns or self.is_kinematic:
-            return
-        raise ValueError(
-            f"Entity '{self.name}': collision_friction={friction} is set without collision_link_patterns, so no geom "
-            f"would take it: it applies only to the links the collision mask keeps. Fix: name those links with "
-            f"collision_link_patterns=[...], or set the friction without disabling any collision, per link with "
-            f"default_geoms_friction={{'<link pattern>': {friction}}} or entity-wide with "
-            f"material=RigidMaterialOptions(friction={friction})."
-        )
-
     def _apply_collision_link_mask(self) -> None:
         """Disable collision on every geom outside the links ``collision_link_patterns`` keeps.
 
@@ -953,8 +934,7 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         collision-pair candidate list from per-geom ``contype``/``conaffinity`` at build time and offers no setter
         for them. So the geom's description is written, which ``RigidGeom.contype``/``conaffinity`` return and the
         collider and the solver read at build. Geoms on kept links keep their own bits; the others get
-        ``contype = conaffinity = 0``. The kept links are resolved here, once, for ``collision_friction`` and the
-        report after the build.
+        ``contype = conaffinity = 0``. The kept links are kept for the report after the build.
 
         Genesis gives an MJCF or USD entity a local collision mask, which filters pairs within the entity only, so
         zeroing the bits would not stop a collision with a grasped cube. Clearing the private
@@ -1562,12 +1542,6 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
             for pattern, sol_params in patterns.items():
                 matched = self._match_geoms("default_geoms_sol_params", pattern, geoms, scope)
                 self._env.set_sol_params(sol_params, geoms_idx=[geom.idx for geom in matched])
-
-        # Before the per-link coefficients, so a `default_geoms_friction` pattern on a kept link wins.
-        if self.collision_friction is not None:  # `_refuse_collision_friction_without_mask` ensured links
-            for geom in self.geoms:
-                if geom.link.name in self._collision_kept_links:
-                    geom.set_friction(self.collision_friction)
 
         # The three per-geom friction coefficients: sliding (unitless), plus the opt-in torsional and
         # rolling ones (in meters, and only read by the solver when the matching EnvOptions switch is

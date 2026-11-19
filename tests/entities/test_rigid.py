@@ -1167,7 +1167,7 @@ _TWO_LINK_MJCF = """<mujoco model="two_link"><worldbody>
       <geom name="pad_geom" type="box" size="0.02 0.02 0.02"/></body></body>
 </worldbody></mujoco>"""
 _TORSIONAL, _ROLLING, _MATERIAL_TORSIONAL = 0.02, 0.003, 0.001
-_PAD_FRICTION, _LINK_FRICTION, _OWN_BITS = 1.7, 0.9, 0b10
+_PAD_FRICTION, _OWN_BITS = 1.7, 0b10
 
 _FREE_DOFS = list(range(6))
 _STABILITY_DAMPING = 2e-4
@@ -1270,13 +1270,10 @@ def mjcf_build(mjcf_assets):
                         default_geoms_friction_torsional={"pad": _TORSIONAL},
                     ),
                     plain_pads=_two_link(asset),
-                    masked_pads=_two_link(asset, collision_link_patterns=["pad"], collision_friction=_PAD_FRICTION),
-                    masked_layered=_two_link(
-                        asset,
-                        collision_link_patterns=["pad"],
-                        collision_friction=_PAD_FRICTION,
-                        default_geoms_friction={"pad": _LINK_FRICTION},
+                    masked_pads=_two_link(
+                        asset, collision_link_patterns=["pad"], default_geoms_friction={"pad": _PAD_FRICTION}
                     ),
+                    masked_peer=_two_link(asset, collision_link_patterns=["pad"]),
                     masked_box=BoxOptions(
                         size=(0.1, 0.1, 0.1),
                         default_root_pos=(0.6, 0.0, 0.05),
@@ -1587,10 +1584,10 @@ def test_mjcf_geoms_without_condim_parse_to_zero_spin_resistance(mjcf_env):
 
 
 def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_build):
-    """Only the matched link collides, at ``collision_friction``; the other keeps its friction and loses its pairs.
+    """Only the matched link collides, at its ``default_geoms_friction``; the other link loses its pairs.
 
     The mask used to be written to a geom attribute Genesis does not read, so it logged as applied and changed
-    nothing, and ``collision_friction`` aborted the build.
+    nothing.
     """
     mjcf_env, _, messages = mjcf_build
     masked, box = mjcf_env.entities["masked_pads"], mjcf_env.entities["box"]
@@ -1613,35 +1610,23 @@ def test_a_collision_mask_reaches_the_solver_and_the_collider(mjcf_build):
     assert "only links ['pad'] collide (1/2 links)" in report
     peers = report.split("can still pair with ")[1]
     assert "'plain_pads'" in peers
-    # Primitives have no local mask, and a masked MJCF entity (`masked_layered`) gave its up.
-    assert not any(f"'{name}'" in peers for name in ("box", "plane", "masked_box", "masked_layered", "masked_marker"))
+    # Primitives have no local mask, and a masked MJCF entity (`masked_peer`) gave its up.
+    assert not any(f"'{name}'" in peers for name in ("box", "plane", "masked_box", "masked_peer", "masked_marker"))
 
 
-def test_a_collision_mask_keeps_the_kept_geoms_own_bits_and_yields_to_a_link_friction(mjcf_env):
-    """It only disables; and ``default_geoms_friction`` is the more specific of the two friction options."""
+def test_a_collision_mask_keeps_the_kept_geoms_own_bits(mjcf_env):
+    """It only disables collision; it does not reset the kept geoms' bits to the default."""
     assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_box"], "contype") == {"box_baselink": _OWN_BITS}
     assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_box"], "conaffinity") == {"box_baselink": _OWN_BITS}
-    assert _solver_by_link(mjcf_env, mjcf_env.entities["masked_layered"], "friction") == {
-        "base": 1.0,
-        "pad": pytest.approx(_LINK_FRICTION),
-    }
 
 
-@pytest.mark.parametrize(
-    "options, match",
-    [
-        (
-            dict(collision_link_patterns=["pad", "nope_*"]),
-            r"'rig'.*`collision_link_patterns` pattern 'nope_\*' matches no link; links: \['base', 'pad'\]\. "
-            r"Fix: correct the pattern",
-        ),
-        (dict(collision_friction=1.5), r"'rig'.*collision_friction=1\.5 is set without collision_link_patterns"),
-    ],
-    ids=["unmatched-pattern", "friction-without-mask"],
-)
-def test_a_collision_mask_that_can_take_no_effect_raises_before_the_scene_builds(mjcf_assets, options, match):
+def test_a_collision_mask_pattern_that_matches_no_link_raises_before_the_scene_builds(mjcf_assets):
+    match = (
+        r"'rig'.*`collision_link_patterns` pattern 'nope_\*' matches no link; links: \['base', 'pad'\]\. "
+        r"Fix: correct the pattern"
+    )
     with pytest.raises(ValueError, match=match):
-        build_env(_config(plane=PlaneOptions(), rig=_two_link(mjcf_assets, **options)))
+        build_env(_config(plane=PlaneOptions(), rig=_two_link(mjcf_assets, collision_link_patterns=["pad", "nope_*"])))
 
 
 @pytest.mark.parametrize("field", ["default_geoms_friction_torsional", "default_geoms_friction"])

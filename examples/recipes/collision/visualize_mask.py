@@ -50,7 +50,6 @@ def main():
     gripper = en.robots.Robotiq2f85(
         vis_mode="collision",  # render collision geometry instead of visual meshes
         collision_link_patterns=[".*pad"] if args.mask else None,
-        collision_friction=2.0 if args.mask else None,
     )
     config = EdenConfig(
         env_options=EnvOptions(num_envs=1),

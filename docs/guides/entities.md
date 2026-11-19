@@ -645,8 +645,8 @@ contact width sees the full capacity.
   other link, before the scene is built. The composite rigs use `collision_link_patterns=[".*pad"]` on the
   Robotiq 2F85 so objects are pinched between the pads instead of wedged against the inner linkage. That holds
   for primitive, URDF and mesh-file objects; see the MJCF / USD exception below.
-  `collision_friction` sets the friction of the geoms it keeps, and requires `collision_link_patterns`. On the
-  rigid solver, the disabled links still collide with an MJCF or USD entity that sets no `collision_link_patterns`
+  To set the kept links' friction, name them in `default_geoms_friction` (below). On the rigid solver, the
+  disabled links still collide with an MJCF or USD entity that sets no `collision_link_patterns`
   itself: Genesis treats those entities' masks as self-collision masks. The build log names those entities.
 
 A kinematic entity has no collision geometry, so these options are ignored on it with a warning.
@@ -662,8 +662,7 @@ Check this when matching another simulator's grasp behaviour. The same rule appl
 coefficients below.
 
 Set friction entity-wide with `material=RigidMaterialOptions(friction=...)`, or per link pattern with
-`default_geoms_friction={pattern: value}`, which is applied at build and keeps every link colliding. Prefer the
-latter over `collision_friction`, which only covers the geoms `collision_link_patterns` keeps.
+`default_geoms_friction={pattern: value}`, which is applied at build and leaves collision as it is.
 
 ### Torsional and rolling friction are opt-in, and their strength is per geom
 

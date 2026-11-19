@@ -236,7 +236,6 @@ def test_mochi_soft_material_rejects_dof_fields():
         {"default_dofs_frictionloss": {"joint1": 0.1}},
         {"default_dofs_force_limits": {"joint1": 10.0}},
         {"default_geoms_sol_params": {".*": (0.02, 1.0, 0.9, 0.95, 0.001, 0.5, 2.0)}},
-        {"collision_link_patterns": [".*pad"], "collision_friction": 2.0},
     ],
 )
 def test_mochi_rigid_rejects_fields_the_solver_never_reads(kwargs):

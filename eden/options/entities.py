@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Annotated, ClassVar, Literal, TypeAlias
+from typing import ClassVar, Literal, TypeAlias
 
 import genesis as gs
 import numpy as np
@@ -150,7 +150,6 @@ RIGID_CONSTRAINT_FIELD_NAMES = (
     "default_geoms_friction",
     "default_geoms_friction_torsional",
     "default_geoms_friction_rolling",
-    "collision_friction",
 )
 
 # Rigid-entity fields the MochiSolver has no counterpart for. It never reads a DOF force range or
@@ -191,7 +190,6 @@ _GROUP_ONLY_FIELD_NAMES = (
     "visualize_contact",
     "vis_mode",
     "collision_link_patterns",
-    "collision_friction",
     "is_fixed_base",
     "is_support_enabled",
     "support_sample_method",
@@ -411,12 +409,7 @@ class BaseEntityOptions(ConfigurableOptions):
         still collide with it: Genesis reads that entity's ``contype`` /
         ``conaffinity`` as a self-collision mask, and skips a pair across two
         entities only when neither has one. The build log names those entities.
-    collision_friction : float, optional
-        Friction coefficient applied to the geoms kept by
-        ``collision_link_patterns`` (e.g. high pad friction for stable grasps),
-        at build like ``default_geoms_friction``, whose patterns win on the
-        same link. Requires ``collision_link_patterns`` (the build raises
-        without it).
+        To set the kept links' friction, name them in ``default_geoms_friction``.
     batch_fixed_verts : bool
         Whether fixed-geometry vertices are batched for per-env transforms.
     is_support_enabled : bool
@@ -490,8 +483,8 @@ class BaseEntityOptions(ConfigurableOptions):
         as ``default_geoms_sol_params``), applied at build — e.g. a dexterous hand's
         fingertips (``{".*_DP": 1.5}``) while the whole hand keeps colliding. Unlike sol
         params the partner geom needs no matching value, since genesis combines a pair's
-        friction as ``max(a, b)``. Prefer this over ``collision_friction``, which only covers
-        the geoms kept by ``collision_link_patterns`` and disables collision elsewhere.
+        friction as ``max(a, b)``. With ``collision_link_patterns``, this is also how the
+        kept links get their own friction (``{".*pad": 2.0}``).
     default_geoms_friction_torsional : dict[str, float]
         Torsional friction (spin resistance about the contact normal, in meters) for the collision
         geoms of links matching each key — same pattern and ``max(a, b)`` pair semantics as
@@ -518,7 +511,6 @@ class BaseEntityOptions(ConfigurableOptions):
     contype: int = 0xFFFF
     conaffinity: int = 0xFFFF
     collision_link_patterns: list[str] | None = None
-    collision_friction: Annotated[float, Field(ge=0.0, allow_inf_nan=False)] | None = None
     batch_fixed_verts: bool = False
     # Support-surface sampling lives on the *base* options: ``is_support_enabled`` is honored for
     # every rigid entity (``RigidEntity.post_build``), so a primitive or a terrain used as a table
@@ -1509,9 +1501,7 @@ _GROUP_ONLY_REASONS = {
         ("surface", "color", "visualize_contact", "vis_mode"),
         "Genesis takes one surface and one visualization mode per entity",
     ),
-    **dict.fromkeys(
-        ("collision_link_patterns", "collision_friction"), "Eden applies the collision mask to the whole entity"
-    ),
+    "collision_link_patterns": "Eden applies the collision mask to the whole entity",
     "is_fixed_base": "the base joint is part of the structure every variant shares",
     **dict.fromkeys(
         (
