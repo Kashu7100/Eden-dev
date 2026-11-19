@@ -20,7 +20,9 @@ Frames and orders, the part a hand-written buffer gets wrong:
   angular velocity. Neither is the free joint's DOF velocity, whose angular half is in the body frame.
 - A **fixed base** has a root pose to store only when it is built with ``batch_fixed_verts=True``: Genesis then
   keeps its pose per env (a robot base or fixture placed differently in each row), otherwise one pose for every
-  env. It never has a root velocity. :func:`stores_root_pose` is the rule.
+  env. It never has a root velocity. :func:`stores_root_pose` is the rule. Genesis still accepts a per-env pose of
+  such a base when its base link carries no collision geom (an MJCF world body), and a row would not keep it, so
+  :func:`capture_reset_states` raises when that pose differs between envs.
 - DOFs are stored **per joint name**, joint-major, for every non-free joint that carries DOFs
   (:attr:`RigidEntity.joints`). That is not ``dofs_name``, which is the *controlled* subset and omits a
   closed-loop gripper's passive followers. Values are the DOF state as Genesis holds it (``get_dofs_pos``):
@@ -559,13 +561,50 @@ def stores_root_pose(entity: RigidEntity) -> bool:
     """Whether a reset-state row carries ``entity``'s root pose: a free base, or a fixed one posed per env.
 
     A fixed base is posed per env only when built with ``batch_fixed_verts=True``; one welded onto another entity
-    follows its parent link and has no root of its own.
+    follows its parent link and has no root of its own. Without the flag Genesis still takes a per-env pose for a base
+    link that carries no collision geom; :func:`capture_reset_states` refuses to capture one posed that way.
     """
     if not entity.has_immobile_base:
         return True
     # The built entity's flag: a per-env-variant group's ``morph`` is a list of its variants', and Genesis batches the
     # group by its first.
     return not entity.is_attached and bool(entity.entity.main_morph.batch_fixed_verts)
+
+
+#: How far apart, per component, two envs' poses of a fixed base without a stored root may sit and still count as one.
+_SHARED_POSE_ATOL = 1e-5
+#: How many differing envs :func:`_check_one_pose_in_every_env` quotes before it counts the rest.
+_SHOWN_ENVS = 4
+
+
+def _check_one_pose_in_every_env(entity: RigidEntity) -> None:
+    """Raise when a fixed base that a row stores no root for has a different pose in some env than in env 0.
+
+    Compares every env, not the captured ones: a row is restored into any env. ``q`` and ``-q`` are one orientation.
+    """
+    pos, quat = entity.get_pos(relative=True), entity.get_quat(relative=True)
+    if pos.ndim < 2 or pos.shape[0] < 2:
+        return
+    pos_off = (pos - pos[:1]).abs().amax(dim=-1)
+    quat_off = torch.minimum((quat - quat[:1]).abs().amax(dim=-1), (quat + quat[:1]).abs().amax(dim=-1))
+    differing = torch.nonzero((pos_off > _SHARED_POSE_ATOL) | (quat_off > _SHARED_POSE_ATOL)).flatten().tolist()
+    if not differing:
+        return
+
+    def pose(i: int) -> str:
+        return f"env {i} at pos {tuple(pos[i].tolist())} quat {tuple(quat[i].tolist())}"
+
+    shown = "; ".join(pose(i) for i in differing[:_SHOWN_ENVS])
+    more = f"; and {len(differing) - _SHOWN_ENVS} more env(s)" if len(differing) > _SHOWN_ENVS else ""
+    raise ValueError(
+        f"capture_reset_states: entity '{entity.name}' is fixed-base without batch_fixed_verts=True, so a reset-state "
+        f"row stores no root pose for it, yet its pose differs between envs: {pose(0)}; {shown}{more}. "
+        "Genesis accepted the per-env pose because its base link carries no collision geom. A row restores no pose "
+        "for it, so a row would land in envs where the entity sits elsewhere. "
+        f"Fix: set batch_fixed_verts=True on '{entity.name}' so rows store and restore its pose per env, or give it "
+        "one pose in every env (set_pos / set_quat with envs_idx=None) before capturing. Capturing only the envs "
+        "that agree is not a fix: a row is restored into any env."
+    )
 
 
 def capture_reset_states(
@@ -581,6 +620,10 @@ def capture_reset_states(
     gripper's passive DOFs included. ``columns`` are task data for the same rows, copied like the states: a live
     tensor passed in (a command's buffer) does not drag the captured rows along when the env steps on. Not for the
     hot path: it reads Genesis state with ordinary getters.
+
+    Raises for a fixed-base entity whose row stores no root (:func:`stores_root_pose`) when its pose differs between
+    envs, in any env, the uncaptured ones included: the row restores no pose for it, so it would land in an env where
+    the entity sits elsewhere.
     """
     from eden.entities.rigid import RigidEntity
     from eden.utils.geom import transform_by_quat
@@ -600,6 +643,8 @@ def capture_reset_states(
             )
         free_joint = free_base_joint(entity, consumer="capture_reset_states")
         root: dict[str, torch.Tensor] = {}
+        if free_joint is None and not entity.is_attached and not stores_root_pose(entity):
+            _check_one_pose_in_every_env(entity)
         if free_joint is None and stores_root_pose(entity):
             root = {
                 "root_pos": entity.get_pos(envs_idx=envs_idx, relative=True),

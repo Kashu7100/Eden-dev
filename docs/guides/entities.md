@@ -964,7 +964,7 @@ vertex-based solid, shell or rod. Solver settings (`MochiOptions`, precision, pe
     pose a fixed base link with collision geoms, of an entity built without `batch_fixed_verts=True`, on a subset of
     envs or differently in different envs. A base link without geoms of such an entity (an MJCF world body with no
     geom of its own) can be posed per env on both solvers, but reset states store no root for it, so
-    `capture_reset_states` does not keep that pose.
+    `capture_reset_states` raises while that pose differs between envs.
 
 ```python
 from eden.engine.solvers.mochi import MochiOptions

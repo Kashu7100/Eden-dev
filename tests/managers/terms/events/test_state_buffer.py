@@ -5,8 +5,10 @@ One scene holds every entity kind the restore distinguishes: a free body re-orig
 ball joint and a hinge (``floppy``), a box (``cube``), and a fixed box posed per env (``post``, built with
 ``batch_fixed_verts``), and a group of fixed boxes, a variant per env block (``shelf``). Two more hold free
 bodies no row can store: two in one entity (``twins``), and one
-inside a per-env fixed base that also carries a hinge (``rack``). The oracles are Genesis' own getters: the
-authored frame through ``relative=True``, and the raw generalized coordinates and DOF velocities.
+inside a per-env fixed base that also carries a hinge (``rack``). ``stand`` is a fixed base without
+``batch_fixed_verts`` whose base link (the MJCF world body) carries no geom, so Genesis lets it be posed per env.
+The oracles are Genesis' own getters: the authored frame through ``relative=True``, and the raw generalized
+coordinates and DOF velocities.
 """
 
 from __future__ import annotations
@@ -53,6 +55,11 @@ RACK_MJCF = """<mujoco model="rack"><compiler angle="radian"/><worldbody>
       <geom type="box" size="0.08 0.01 0.01" mass="0.1"/></body></body>
   <body name="loose" pos="0 0 0.3"><freejoint name="loose_free"/><geom type="box" size="0.02 0.02 0.02" mass="0.1"/></body>
 </worldbody></mujoco>"""
+STAND_MJCF = """<mujoco model="stand"><worldbody>
+  <body name="top" pos="0 0 0.1"><geom type="box" size="0.05 0.05 0.05"/>
+    <body name="lid" pos="0 0 0.08"><joint name="lid_hinge" axis="0 1 0"/><geom type="box" size="0.05 0.05 0.01"/></body></body>
+</worldbody></mujoco>"""
+STAND_POS = (0.0, -0.4, 0.0)
 
 
 def _yaw_pitch(yaw: float, pitch: float) -> list[float]:
@@ -115,6 +122,7 @@ def env(tmp_path_factory):
         ("floppy", FLOPPY_MJCF),
         ("twins", TWINS_MJCF),
         ("rack", RACK_MJCF),
+        ("stand", STAND_MJCF),
     ):
         (assets / f"{name}.xml").write_text(text)
     buffer_path = assets / "authored.pt"
@@ -137,6 +145,7 @@ def env(tmp_path_factory):
                     batch_fixed_verts=True,
                     default_root_pos=(0.6, 0, 0.1),
                 ),
+                stand=EntityOptions(file=str(assets / "stand.xml"), is_fixed_base=True, default_root_pos=STAND_POS),
                 shelf=GroupedEntityOptions(
                     is_fixed_base=True,
                     grouped_entities=[
@@ -401,6 +410,41 @@ def test_capture_refuses_a_free_body_no_row_can_hold(env, name, match):
     """A row stores one root per entity: any other free body would keep the previous episode's pose on a restore."""
     with pytest.raises(ValueError, match=f"capture_reset_states: {match}"):
         capture_reset_states(env, [name])
+
+
+@pytest.fixture
+def stand(env):
+    """The geom-less fixed base, put back at one pose in every env after a test poses it per env."""
+    stand = env.entities["stand"]
+    yield stand
+    stand.set_pos(torch.tensor([STAND_POS] * NUM_ENVS, device=env.device), relative=True)
+    stand.set_quat(torch.tensor([[1.0, 0.0, 0.0, 0.0]] * NUM_ENVS, device=env.device), relative=True)
+
+
+def test_capture_stores_no_root_for_a_fixed_base_at_one_pose_in_every_env(env, stand):
+    """``q`` and ``-q`` are one orientation, so a sign flip in one env is still one pose."""
+    quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * NUM_ENVS, device=env.device)
+    quat[1] = -quat[1]
+    stand.set_quat(quat, relative=True)
+    captured = capture_reset_states(env, ["stand"]).entities["stand"]
+    assert not captured.has_root
+    assert captured.joints_name == ("lid_hinge",)
+
+
+@pytest.mark.parametrize("envs_idx", [None, [0]], ids=["every-env", "an-env-the-pose-agrees-in"])
+def test_capture_refuses_a_fixed_base_without_a_stored_root_posed_per_env(env, stand, envs_idx):
+    """A row restores no pose for ``stand``, so it would land in envs where the stand sits elsewhere.
+
+    Env 0 alone agrees with itself, yet its row is restored into env 2 as well: every env is compared.
+    """
+    stand.set_pos(torch.tensor([[1.0, -0.4, 0.0]], device=env.device), envs_idx=torch.tensor([2], device=env.device))
+    assert stand.get_pos(relative=True)[2, 0].item() == pytest.approx(1.0)  # Genesis took the per-env pose
+    with pytest.raises(ValueError, match=r"entity 'stand' is fixed-base without batch_fixed_verts=True") as raised:
+        capture_reset_states(env, ["stand"], envs_idx=envs_idx)
+    message = str(raised.value)
+    assert "env 2 at pos (1.0, -0.4" in message
+    assert "env 1" not in message and "env 3" not in message
+    assert "Fix: set batch_fixed_verts=True on 'stand'" in message
 
 
 def test_capture_reads_only_the_envs_a_mask_selects(env):
