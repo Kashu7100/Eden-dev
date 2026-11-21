@@ -1113,6 +1113,8 @@ to one mesh (`init_positions`, `elems`, `n_elements`) raises: read it per varian
 `entity.entity.variants[k].set_visual_mesh(get_asset_path(file))`. The terms of `eden.tasks.mochi` that read
 vertex arrays refuse a heterogeneous body at build.
 
+Worked script: `examples/recipes/mochi/cloth_heterogeneous.py`.
+
 The solver's topology tables have no env axis, so every variant is a body of the solver in every env. In an env
 that holds another variant it stays fixed at its rest pose, out of contact, out of the element assembly, and is not
 drawn. Memory and the extents of the per-step loops therefore grow with the summed size of the variants times

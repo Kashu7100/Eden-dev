@@ -504,3 +504,26 @@ def test_a_heterogeneous_mochi_body_refuses_the_calls_that_place_one_mesh():
 
     env.register_pre_build_hook(place_one_mesh)
     env.build()
+
+
+@pytest.mark.requires_genesis
+def test_a_mochi_group_of_one_variant_is_an_ordinary_one_mesh_body():
+    env = EnvBase(
+        env_options=EnvOptions(num_envs=2, sim_dt=1.0 / 60.0, mochi_options=MochiOptions(n_newton_iterations=4)),
+        scene_options=SceneOptions(
+            plane=PlaneOptions(material=MochiRigidMaterialOptions(**SOFT_CONTACT)),
+            cloth=GroupedEntityOptions(
+                material=MochiShellMaterialOptions(E=1e5, thickness=2e-3, **SOFT_CONTACT),
+                default_root_pos=(0.0, 0.0, 0.3),
+                grouped_entities=[BoxOptions(size=(0.3, 0.3, 0.01))],
+            ),
+        ),
+    )
+    env.build()
+    cloth = env.entities["cloth"]
+    assert type(cloth.entity).__name__ == "MochiSoftEntity"
+    assert not cloth.has_variant_meshes
+    assert cloth.vertices_mask.all() and cloth.vertices_mask.shape == (2, cloth.n_vertices)
+    assert cloth.init_positions.shape == (cloth.n_vertices, 3)
+    assert cloth.get_mass().ndim == 0
+    torch.testing.assert_close(cloth.get_pos(), torch.tensor([[0.0, 0.0, 0.3]] * 2), rtol=0.0, atol=1e-6)

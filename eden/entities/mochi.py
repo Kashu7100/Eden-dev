@@ -248,10 +248,18 @@ class MochiSoftEntity(Entity):
 
     def _vertex_mean(self, values: torch.Tensor) -> torch.Tensor:
         """Mean over the vertex axis of ``(B, n_vertices, 3)`` values, over each env's own vertices when heterogeneous."""
-        if not self.is_heterogeneous:
+        if not self.has_variant_meshes:
             return values.mean(dim=1)
         mask = self.vertices_mask.unsqueeze(-1)
         return (values * mask).sum(dim=1) / mask.sum(dim=1)
+
+    @property
+    def has_variant_meshes(self) -> bool:
+        """Whether each env holds one of several variant meshes.
+
+        A ``GroupedEntityOptions`` of one variant builds an ordinary one-mesh body, which this reports as False.
+        """
+        return self.is_heterogeneous and self.num_variants > 1
 
     @property
     def vertices_mask(self) -> torch.Tensor:
@@ -260,7 +268,7 @@ class MochiSoftEntity(Entity):
         All true for a homogeneous body; for a heterogeneous one, the rows past the vertices of an env's own
         variant are padding.
         """
-        if not self.is_heterogeneous:
+        if not self.has_variant_meshes:
             return torch.ones((self._env.num_envs, self.n_vertices), dtype=torch.bool, device=self.device)
         mask = self._entity.vertices_mask
         return mask.unsqueeze(0) if mask.ndim == 1 else mask
@@ -320,7 +328,7 @@ class MochiSoftEntity(Entity):
         """Total mass (kg) from the material density and the rest geometry: a 0-dim tensor, or ``(num_envs,)``,
         each env's own variant, for a heterogeneous body.
         """
-        if self.is_heterogeneous:
+        if self.has_variant_meshes:
             masses = torch.tensor(
                 [float(body.mass) for body in self._entity.variants], dtype=gs.tc_float, device=self.device
             )
@@ -617,7 +625,7 @@ class MochiSoftEntity(Entity):
 
     def _refuse_heterogeneous(self, method: str) -> None:
         """Refuse a call that places one mesh, or ties one to a link, on a heterogeneous body."""
-        if not self.is_heterogeneous:
+        if not self.has_variant_meshes:
             return
         if method in ("set_visual_mesh", "set_contact_skin"):
             fix = (
@@ -666,7 +674,7 @@ class MochiSoftEntity(Entity):
         return self._entity.n_elements
 
     def _require_one_mesh(self, what: str) -> None:
-        if self.is_heterogeneous:
+        if self.has_variant_meshes:
             raise TypeError(
                 f"MochiSoftEntity '{self.name}' is heterogeneous ({self.num_variants} variants), so `{what}` is "
                 f"per variant: read `entity.entity.variants[k].{what}`, with k = `entity.env_variant_idx[env]` for "

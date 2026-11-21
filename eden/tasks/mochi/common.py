@@ -186,7 +186,7 @@ def resolve_one_mesh_soft_body(term, entity_name: str):
     from eden.utils.string import term_subject
 
     body = term.resolve_entity(entity_name)
-    if getattr(body, "is_heterogeneous", False):
+    if getattr(body, "has_variant_meshes", False):
         raise NotImplementedError(
             f"{term_subject(term)} reads the per-vertex arrays of '{entity_name}', which is heterogeneous "
             f"({body.num_variants} variants): the rows past each env's own variant are zero padding, which this "

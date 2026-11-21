@@ -287,8 +287,11 @@ def _bind_rasterizer(scene: Scene, solver: MochiSolver) -> None:
     on_fem, update_fem = context.on_fem, context.update_fem
 
     def _soft_vverts(self):
+        # The render kernels place every environment at its offset, which the rasterizer adds again to a mesh bound
+        # to one environment (`envs=`): hand it the vertices without the offset.
         vverts_pos, _, _ = solver.get_soft_state_render()
-        return qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+        vverts = qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
+        return vverts - np.asarray(self.scene.envs_offset, dtype=vverts.dtype)[self.rendered_envs_idx, np.newaxis]
 
     def is_drawn(entity, i_b):
         # A variant of a heterogeneous entity gets no node in the environments where it is absent

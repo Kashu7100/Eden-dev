@@ -184,6 +184,34 @@ def test_the_rasterizer_draws_the_rigid_and_the_deformable_bodies():
     assert np.argwhere(red).mean(axis=0)[0] > np.argwhere(red_start).mean(axis=0)[0]
 
 
+def test_the_rasterizer_draws_a_deformable_body_at_the_offset_of_its_environment():
+    scene = _scene(vis_options=gs.options.VisOptions(rendered_envs_idx=[0, 1, 2, 3]))
+    scene.add_entity(
+        gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.7), fixed=True),
+        material=mochi_materials.Rigid(),
+        surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0)),
+    )
+    scene.add_entity(
+        gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.2)),
+        material=mochi_materials.Elastic(E=1e5),
+        surface=gs.surfaces.Default(color=(0.0, 0.0, 1.0)),
+    )
+    camera = scene.add_camera(res=(320, 120), pos=(0.0, -5.0, 0.45), lookat=(0.0, 0.0, 0.45), fov=40, GUI=False)
+    scene.build(n_envs=4, env_spacing=(1.5, 1.5))
+    # The four environments stand on a 2 x 2 grid, which the camera faces along y
+    assert len(np.unique(np.asarray(scene.envs_offset)[:, 0])) == 2
+    rgb = np.asarray(camera.render()[0])
+
+    # The camera faces the shaded sides of the boxes, so a colour is told by its dominant channel
+    r, g, b = (rgb[..., k].astype(int) for k in range(3))
+    red = (r > 30) & (r > 2 * g) & (r > 2 * b)
+    blue = (b > 30) & (b > 2 * r) & (b > 2 * g)
+    # In every environment the deformable box stands under the rigid one, so the same columns hold red and blue
+    red_columns, blue_columns = np.flatnonzero(red.any(axis=0)), np.flatnonzero(blue.any(axis=0))
+    assert np.ptp(red_columns) > 40
+    assert abs(red_columns.min() - blue_columns.min()) <= 2 and abs(red_columns.max() - blue_columns.max()) <= 2
+
+
 def test_a_frame_drawn_after_a_setter_shows_the_body_where_the_setter_put_it():
     """A setter between two steps syncs the rasterizer with the nodes of the solver it changed alone, as the
     interactive viewer does on every change of a body's geometry; the camera's next frame draws from those nodes.
