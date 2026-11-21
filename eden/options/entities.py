@@ -1163,7 +1163,10 @@ class GroupedEntityOptions(BaseEntityOptions):
     """Grouped entity used for heterogeneous batching.
 
     Supports both non-articulated entities (Mesh, Primitive) and articulated entities (URDF)
-    that share the same joint structure (same number of links, joints, and DOFs).
+    that share the same joint structure (same number of links, joints, and DOFs). With a Mochi deformable
+    ``material`` (``MochiElasticMaterialOptions``, ``MochiShellMaterialOptions``, ``MochiRodMaterialOptions``) the
+    group is a soft body with a different mesh per env (``eden.entities.mochi.MochiSoftEntity``), whose variants take
+    the group's material and hold no per-variant field; ``MochiRigidMaterialOptions`` is refused.
 
     Each variant contributes its morph (file or shape, mesh processing, its own ``default_root_pos`` /
     ``default_root_quat``), and may hold its own value for some of the group's fields. A variant holds a
@@ -1260,14 +1263,23 @@ class GroupedEntityOptions(BaseEntityOptions):
         self.is_articulated = any_articulated
         self.is_actuated = any_actuated
 
-        # The MochiSolver refuses heterogeneous (list) morphs outright. Checked before the variants, whose
-        # material checks would otherwise point at moving the Mochi material onto the group.
-        if any(
-            isinstance(m, MochiMaterialOptions) for m in (self.material, *(e.material for e in self.grouped_entities))
+        # The MochiSolver builds no heterogeneous rigid body. Checked before the variants, whose material checks would
+        # otherwise point at moving the rigid Mochi material onto the group.
+        for where, material in (
+            ("the group", self.material),
+            *((_where(i, v), v.material) for i, v in enumerate(self.grouped_entities)),
         ):
-            raise ValueError(
-                "GroupedEntityOptions cannot carry a Mochi material: the MochiSolver has no heterogeneous morphs."
-            )
+            if isinstance(material, MOCHI_RIGID_MATERIAL_TYPES):
+                raise ValueError(
+                    f"GroupedEntityOptions: {where} carries {type(material).__name__}, but the MochiSolver builds a "
+                    f"rigid body from one morph, so a heterogeneous Mochi entity cannot be rigid. Fix: add one "
+                    f"entity per shape, each with its own {type(material).__name__}(...). A heterogeneous Mochi "
+                    f"entity is deformable: set material=MochiElasticMaterialOptions(...), "
+                    f"MochiShellMaterialOptions(...) or MochiRodMaterialOptions(...) on the GroupedEntityOptions."
+                )
+        if isinstance(self.material, MOCHI_SOFT_MATERIAL_TYPES):
+            _validate_no_dofs_for_non_rigid_material(self)
+            _validate_mochi_visualize_contact(self)
 
         self.check_variants()
 
@@ -1290,6 +1302,8 @@ class GroupedEntityOptions(BaseEntityOptions):
         for i, variant in enumerate(self.grouped_entities):
             if variant.material is not None:
                 self._refuse_variant_material(i, variant.material)
+        if isinstance(self.material, MOCHI_SOFT_MATERIAL_TYPES):
+            self._refuse_mochi_soft_variant_values()
         self._refuse_implicit_variant_overrides()
         self._refuse_unused_group_values()
 
@@ -1419,6 +1433,26 @@ class GroupedEntityOptions(BaseEntityOptions):
                 f"{list(_PER_VARIANT_MATERIAL_FIELD_NAMES)} may differ per variant. Fix: put the shared fields on "
                 f"GroupedEntityOptions(material=...) and {keep}."
             )
+
+    def _refuse_mochi_soft_variant_values(self) -> None:
+        """Refuse a per-variant value on a variant of a deformable Mochi group, which applies none: the MochiSolver
+        builds every variant from the group's one material, and a deformable body has no geoms or DOFs.
+        """
+        for i, variant in enumerate(self.grouped_entities):
+            own = [name for name in _PER_VARIANT_FIELD_NAMES if _has_own_value(variant, name)]
+            own += [
+                f"material.{name}"
+                for name in _own_material_values(variant.material, _PER_VARIANT_MATERIAL_FIELD_NAMES)
+                if getattr(variant.material, name) != getattr(self.material, name)
+            ]
+            if own:
+                raise ValueError(
+                    f"GroupedEntityOptions {_where(i, variant)} sets {own}, which a heterogeneous Mochi deformable "
+                    f"entity cannot apply per variant: the MochiSolver builds every variant from the group's one "
+                    f"{type(self.material).__name__}, and a deformable body has no geoms or DOFs to take them. Fix: "
+                    f"remove {own} from the variant, and set the material fields once on "
+                    f"GroupedEntityOptions(material={type(self.material).__name__}(...)) if every variant shares them."
+                )
 
     def _refuse_implicit_variant_overrides(self) -> None:
         """Refuse a variant whose class default, rather than a value of its own, overrides the group's own value.

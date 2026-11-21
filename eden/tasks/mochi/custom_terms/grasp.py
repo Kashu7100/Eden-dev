@@ -26,7 +26,7 @@ from genesis.utils.geom import inv_transform_by_quat, transform_by_quat
 from eden.managers.action_manager import ACTION_TERM_REGISTRY
 from eden.managers.metric_manager import METRIC_TERM_REGISTRY, MetricTerm
 from eden.managers.terms.actions.binary_actions import BinaryJointController
-from eden.tasks.mochi.common import YAM_FINGER_SPEED, link_point
+from eden.tasks.mochi.common import YAM_FINGER_SPEED, link_point, resolve_one_mesh_soft_body
 from eden.utils.string import term_subject
 
 if TYPE_CHECKING:
@@ -156,7 +156,7 @@ class _PinningGripper(RateLimitedGripper):
                 f"{'not an entity' if soft is None else f'a {type(soft).__name__}'}. Mochi soft bodies in this "
                 f"scene: {[n for n, e in self._env.entities.items() if isinstance(e, MochiSoftEntity)]}."
             )
-        self._soft = soft
+        self._soft = resolve_one_mesh_soft_body(self, self.soft_entity_name)
         self._hand = self.entity.get_link(self.hand_link_name)
         k = min(self.max_vertices, soft.n_vertices)
         self._pinned = torch.full((self.num_envs, k), -1, dtype=gs.tc_int, device=self.device)

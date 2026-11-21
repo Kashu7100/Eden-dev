@@ -17,6 +17,8 @@ from eden.options.actuators import Unitree7520_14
 from eden.options.materials import (
     MPMElasticMaterialOptions,
     MochiElasticMaterialOptions,
+    MochiRigidMaterialOptions,
+    MochiShellMaterialOptions,
     PBDClothMaterialOptions,
     RigidMaterialOptions,
     SPHLiquidMaterialOptions,
@@ -334,6 +336,56 @@ def test_primitives_take_a_prebuilt_morph_override_and_file_entities_refuse_one(
 def test_grouped_entities_must_be_alike(grouped, match):
     with pytest.raises(ValueError, match=match):
         GroupedEntityOptions(grouped_entities=grouped)
+
+
+def test_a_group_of_variants_takes_a_deformable_mochi_material():
+    group = GroupedEntityOptions(
+        material=MochiShellMaterialOptions(),
+        grouped_entities=[BoxOptions(size=(0.3, 0.3, 0.01)), SphereOptions(radius=0.1)],
+    )
+    assert isinstance(group.material, MochiShellMaterialOptions)
+    # A variant may restate the group's material, which a tetrahedral mesh file needs (see EntityOptions)
+    GroupedEntityOptions(
+        material=MochiElasticMaterialOptions(E=5e4),
+        grouped_entities=[BoxOptions(material=MochiElasticMaterialOptions(E=5e4)), BoxOptions()],
+    )
+
+
+@pytest.mark.parametrize(
+    ("group", "match"),
+    [
+        (
+            {"material": MochiRigidMaterialOptions(), "grouped_entities": [BoxOptions(), BoxOptions()]},
+            r"the group carries MochiRigidMaterialOptions.*Fix: add one entity per shape",
+        ),
+        (
+            {"grouped_entities": [BoxOptions(), BoxOptions(material=MochiRigidMaterialOptions())]},
+            r"grouped_entities\[1\] \(BoxOptions\) carries MochiRigidMaterialOptions",
+        ),
+        (
+            {
+                "material": MochiShellMaterialOptions(),
+                "grouped_entities": [BoxOptions(default_geoms_friction={"*": 2.0}), BoxOptions()],
+            },
+            r"grouped_entities\[0\] \(BoxOptions\) sets \['default_geoms_friction'\].*cannot apply per variant",
+        ),
+        (
+            {
+                "material": MochiShellMaterialOptions(),
+                "grouped_entities": [BoxOptions(), BoxOptions(material=MochiShellMaterialOptions(friction=0.9))],
+            },
+            r"grouped_entities\[1\] \(BoxOptions\) sets \['material.friction'\].*GroupedEntityOptions\(material=",
+        ),
+        (
+            {"material": MochiShellMaterialOptions(), "dofs_name": ["j"], "grouped_entities": [BoxOptions()]},
+            r"Rigid-solver fields \['dofs_name'\] cannot be used with MochiShellMaterialOptions",
+        ),
+    ],
+    ids=["rigid-group", "rigid-variant", "variant-geom-field", "variant-material-field", "group-dofs"],
+)
+def test_a_mochi_group_refuses_what_its_variants_cannot_apply(group, match):
+    with pytest.raises(ValueError, match=match):
+        GroupedEntityOptions(**group)
 
 
 def _urdf(file: str, **fields) -> EntityOptions:

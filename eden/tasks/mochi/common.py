@@ -177,6 +177,25 @@ def bench(friction: float = 0.9, penalty_threshold: float = 1e-3) -> PlaneOption
     )
 
 
+def resolve_one_mesh_soft_body(term, entity_name: str):
+    """Resolve the Mochi soft body a term reads per-vertex arrays of, and refuse a heterogeneous one.
+
+    The vertex arrays of a heterogeneous body span its largest variant, so an env holding a smaller one reads zero
+    rows past its own vertices, which the terms here would take for vertices at the origin.
+    """
+    from eden.utils.string import term_subject
+
+    body = term.resolve_entity(entity_name)
+    if getattr(body, "is_heterogeneous", False):
+        raise NotImplementedError(
+            f"{term_subject(term)} reads the per-vertex arrays of '{entity_name}', which is heterogeneous "
+            f"({body.num_variants} variants): the rows past each env's own variant are zero padding, which this "
+            f"term would read as vertices. Fix: build '{entity_name}' from one morph, or mask the reads with "
+            f"`entity.vertices_mask` in the term."
+        )
+    return body
+
+
 def link_point(link, offset: torch.Tensor) -> torch.Tensor:
     """World position of the point fixed at ``offset`` in ``link``'s frame, ``(num_envs, 3)``."""
     quat = link.get_quat()

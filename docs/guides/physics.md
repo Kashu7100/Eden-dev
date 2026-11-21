@@ -359,8 +359,10 @@ set. `env.mochi_solver` returns it, and raises if no entity of the scene takes a
   [Sensors and rendering](sensors-and-rendering.md).
 - **Options refused at validation.** A `MochiRigidMaterialOptions` entity rejects `default_dofs_frictionloss`,
   `default_dofs_force_limits` and the constraint-solver (sol params) fields, since the solver clamps no drive force,
-  models no joint friction loss and has no constraint solver. Support-surface fields, `visualize_contact=True`,
-  `GroupedEntityOptions` and `TerrainOptions` are refused with a Mochi material too.
+  models no joint friction loss and has no constraint solver. Support-surface fields, `visualize_contact=True` and
+  `TerrainOptions` are refused with a Mochi material too, and `GroupedEntityOptions` with `MochiRigidMaterialOptions`:
+  given a Mochi deformable material it builds a soft body with a different mesh per env (see
+  [Heterogeneous soft bodies](entities.md#heterogeneous-soft-bodies)).
 - **Per-env DOF properties** are `MochiOptions.batch_dofs_info` (default `False`), not `EnvOptions.batch_dofs_info`,
   which configures the rigid solver only.
 

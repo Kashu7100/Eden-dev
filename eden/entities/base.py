@@ -226,12 +226,21 @@ class Entity(ConfigurableMixin[EntityOptions]):
         """Create grouped morphs for heterogeneous entities, and record which variant each env holds."""
         from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
 
-        from eden.options.entities import GroupedEntityOptions
+        from eden.engine.solvers.mochi.morphs import Rod
+        from eden.options.entities import MOCHI_SOFT_MATERIAL_TYPES, GroupedEntityOptions
+        from eden.options.materials import MochiRodMaterialOptions
 
         if not isinstance(self._options, GroupedEntityOptions):
             return
 
-        _SUPPORTED_MORPH_TYPES = (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)
+        # The variants of a deformable Mochi body are the meshes of a solid or shell, or the polylines of a rod
+        is_mochi_soft = isinstance(self._options.material, MOCHI_SOFT_MATERIAL_TYPES)
+        if not is_mochi_soft:
+            supported_morph_types = (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)
+        elif isinstance(self._options.material, MochiRodMaterialOptions):
+            supported_morph_types = (Rod,)
+        else:
+            supported_morph_types = (gs.morphs.Box, gs.morphs.Sphere, gs.morphs.Cylinder, gs.morphs.Mesh)
 
         morphs_heterogeneous = []
         variants_pos, variants_quat = [], []
@@ -247,17 +256,31 @@ class Entity(ConfigurableMixin[EntityOptions]):
 
             temp_entity = RigidEntity(self._env, entity_options)
 
-            if not isinstance(temp_entity.morph, _SUPPORTED_MORPH_TYPES):
+            if not isinstance(temp_entity.morph, supported_morph_types):
+                material = type(self._options.material).__name__ if is_mochi_soft else "a rigid material"
                 raise ValueError(
-                    f"Only Primitive, Mesh, URDF, and MJCF morphs are supported for grouped entity, "
-                    f"got {type(temp_entity.morph).__name__}."
+                    f"GroupedEntityOptions grouped_entities[{len(morphs_heterogeneous)}] "
+                    f"({type(entity_options).__name__}) makes a {type(temp_entity.morph).__name__} morph, but a group "
+                    f"of {material} takes {', '.join(t.__name__ for t in supported_morph_types)} morphs. Fix: replace "
+                    f"the variant with one of those."
                 )
 
             variants_pos.append(temp_entity.default_root_pos.squeeze(0))
             variants_quat.append(temp_entity.default_root_quat.squeeze(0))
 
+            if is_mochi_soft:
+                # A deformable body has no root pose to write after the build: its morph carries the group's default
+                # pose composed with the variant's own, which is the pose `get_default_root_pose` reports
+                group_quat = np.asarray(self._options.default_root_quat, dtype=gs.np_float)
+                variant_pos = np.asarray(entity_options.default_root_pos, dtype=gs.np_float)
+                variant_quat = np.asarray(entity_options.default_root_quat, dtype=gs.np_float)
+                temp_entity.morph.pos = tuple(
+                    np.asarray(self._options.default_root_pos, dtype=gs.np_float)
+                    + gu.transform_by_quat(variant_pos, group_quat)
+                )
+                temp_entity.morph.quat = tuple(gu.transform_quat_by_quat(variant_quat, group_quat))
             # Override morph fixed property if needed (MJCF does not support fixed)
-            if not isinstance(temp_entity.morph, gs.morphs.MJCF):
+            elif not isinstance(temp_entity.morph, gs.morphs.MJCF):
                 if hasattr(temp_entity.morph, "fixed"):
                     temp_entity.morph.fixed = self._options.is_fixed_base
 

@@ -13,11 +13,12 @@ import trimesh
 from eden.engine.solvers.mochi.options import MochiOptions
 from eden.envs.base import EnvBase
 from eden.options import EnvOptions, RodOptions, SceneOptions
-from eden.options.entities import BoxOptions, EntityOptions, PlaneOptions, SphereOptions
+from eden.options.entities import BoxOptions, EntityOptions, GroupedEntityOptions, PlaneOptions, SphereOptions
 from eden.options.materials import (
     MochiElasticMaterialOptions,
     MochiRigidMaterialOptions,
     MochiRodMaterialOptions,
+    MochiShellMaterialOptions,
 )
 
 SOFT_CONTACT = {"penalty_coefficient": 1e7}
@@ -432,4 +433,74 @@ def test_contact_skin_and_set_rest_positions_refuse_each_other(tmp_path):
             skinned.set_rest_positions(skinned.init_positions + np.array([0.0, 0.0, 0.2]))
 
     env.register_pre_build_hook(both_orders)
+    env.build()
+
+
+def _cloth_env(num_envs=3):
+    """A heterogeneous cloth: two sheets of different sizes, the group turned a quarter turn about z."""
+    return EnvBase(
+        env_options=EnvOptions(num_envs=num_envs, sim_dt=1.0 / 60.0, mochi_options=MochiOptions(n_newton_iterations=4)),
+        scene_options=SceneOptions(
+            plane=PlaneOptions(material=MochiRigidMaterialOptions(**SOFT_CONTACT)),
+            cloth=GroupedEntityOptions(
+                material=MochiShellMaterialOptions(E=1e5, thickness=2e-3, **SOFT_CONTACT),
+                default_root_pos=(0.0, 0.0, 0.3),
+                default_root_quat=(np.cos(np.pi / 4), 0.0, 0.0, np.sin(np.pi / 4)),
+                grouped_entities=[
+                    BoxOptions(size=(0.3, 0.3, 0.01)),
+                    BoxOptions(size=(0.2, 0.2, 0.01), default_root_pos=(0.1, 0.0, 0.05)),
+                ],
+            ),
+        ),
+    )
+
+
+@pytest.mark.requires_genesis
+@pytest.mark.slow
+def test_a_heterogeneous_mochi_shell_builds_steps_and_resets():
+    """Each env holds one sheet at the group's pose composed with the sheet's own, reads it over the vertex axis of
+    the larger sheet, and gets it back on reset.
+    """
+    env = _cloth_env()
+    env.build()
+    cloth = env.entities["cloth"]
+    engine = cloth.entity
+    assert type(engine).__name__ == "MochiSoftVariantsEntity"
+    # The engine assigns the variants as Eden records them
+    assert cloth.env_variant_idx.tolist() == [0, 0, 1] == engine.envs_variant_idx.tolist()
+    assert cloth.n_vertices == max(engine.variants_n_vertices)
+    assert cloth.get_vertex_positions().shape == (3, cloth.n_vertices, 3)
+    assert cloth.vertices_mask.sum(dim=-1).tolist() == [engine.variants_n_vertices[k] for k in (0, 0, 1)]
+    # The second sheet's offset turned with the group: (0.1, 0, 0.05) a quarter turn about z is (0, 0.1, 0.05)
+    torch.testing.assert_close(
+        cloth.get_pos(), torch.tensor([[0.0, 0.0, 0.3], [0.0, 0.0, 0.3], [0.0, 0.1, 0.35]]), rtol=0.0, atol=1e-6
+    )
+    torch.testing.assert_close(cloth.get_pos(), cloth.get_default_root_pose()[0], rtol=0.0, atol=1e-6)
+    masses = cloth.get_mass()
+    assert masses.shape == (3,) and masses[0] == masses[1] and masses[2] < masses[0]
+    with pytest.raises(TypeError, match=r"heterogeneous \(2 variants\).*entity\.entity\.variants\[k\]\.init_positions"):
+        cloth.init_positions
+
+    built = cloth.get_vertex_positions().clone()
+    for _ in range(5):
+        env.scene.step()
+    assert (cloth.get_pos()[:, 2] < torch.tensor([0.3, 0.3, 0.35])).all()
+    # The padding rows stay zero and the masked centroid ignores them
+    assert (cloth.get_vertex_positions()[~cloth.vertices_mask] == 0.0).all()
+    env.reset()
+    torch.testing.assert_close(cloth.get_vertex_positions(), built, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.requires_genesis
+def test_a_heterogeneous_mochi_body_refuses_the_calls_that_place_one_mesh():
+    env = _cloth_env(num_envs=2)
+
+    def place_one_mesh():
+        cloth = env.entities["cloth"]
+        with pytest.raises(NotImplementedError, match=r"heterogeneous \(2 variants, one per env\).*variants\[k\]"):
+            cloth.set_visual_mesh("meshes/sphere.obj")
+        with pytest.raises(NotImplementedError, match=r"`set_rest_positions` acts on one mesh"):
+            cloth.set_rest_positions(np.zeros((8, 3)))
+
+    env.register_pre_build_hook(place_one_mesh)
     env.build()
