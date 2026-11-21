@@ -43,6 +43,7 @@ _LAZY_NAMES = {
     "MochiRigidSpec": "eden.engine.solvers.mochi.specs",
     "MochiSoftSpec": "eden.engine.solvers.mochi.specs",
     "MochiSoftEntity": "eden.engine.solvers.mochi.mochi_soft_entity",
+    "MochiSoftVariantsEntity": "eden.engine.solvers.mochi.mochi_soft_variants",
     "MochiSolver": "eden.engine.solvers.mochi.mochi_solver",
     "Rod": "eden.engine.solvers.mochi.morphs",
     "add_mochi_entity": "eden.engine.solvers.mochi.hosting",

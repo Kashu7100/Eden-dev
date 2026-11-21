@@ -424,6 +424,7 @@ def func_pcg_init(
             soft_info,
             soft_state,
             rigid_config,
+            mochi_config,
             mochi_info.EPS[None],
         )
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))

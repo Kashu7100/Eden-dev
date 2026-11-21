@@ -290,6 +290,11 @@ def _bind_rasterizer(scene: Scene, solver: MochiSolver) -> None:
         vverts_pos, _, _ = solver.get_soft_state_render()
         return qd_to_numpy(vverts_pos, self.rendered_envs_idx, transpose=True)
 
+    def is_drawn(entity, i_b):
+        # A variant of a heterogeneous entity gets no node in the environments where it is absent
+        is_active = solver.soft_entities_is_active
+        return is_active is None or is_active[entity.idx_in_solver, i_b]
+
     def on_fem_with_mochi(self):
         on_fem()
         if not solver.has_soft:
@@ -303,6 +308,8 @@ def _bind_rasterizer(scene: Scene, solver: MochiSolver) -> None:
                 seg_key = (entity.idx, i_g) if self.segmentation_level == "geom" else entity.idx
                 vverts = vverts_all[:, vgeom.vvert_start : vgeom.vvert_end]
                 for env_i, i_b in enumerate(self.rendered_envs_idx):
+                    if not is_drawn(entity, i_b):
+                        continue
                     mesh = trimesh.Trimesh(vverts[env_i], vgeom.vmesh.faces, process=False)
                     mesh.visual = visual
                     node = pyrender.Mesh.from_trimesh(
@@ -323,6 +330,8 @@ def _bind_rasterizer(scene: Scene, solver: MochiSolver) -> None:
             for vgeom in entity.vgeoms:
                 vverts = vverts_all[:, vgeom.vvert_start : vgeom.vvert_end]
                 for env_i, i_b in enumerate(self.rendered_envs_idx):
+                    if not is_drawn(entity, i_b):
+                        continue
                     node = self.static_nodes[(i_b, vgeom.uid)]
                     render_verts = vverts[env_i].astype(np.float32, copy=False)
                     update_data = self._scene.reorder_vertices(node, render_verts)

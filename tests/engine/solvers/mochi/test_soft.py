@@ -268,6 +268,7 @@ def test_soft_hessian_finite_difference(show_viewer):
         solver.soft_state,
         solver.island_state,
         solver.rigid_config,
+        solver.mochi_config,
     )
     dof_start = solver.n_dofs
     H = qd_to_numpy(solver.mochi_state.H_dense)[0][dof_start:, dof_start:].copy()
@@ -402,6 +403,7 @@ def test_soft_soft_hessian_finite_difference(show_viewer):
         solver.soft_state,
         solver.island_state,
         solver.rigid_config,
+        solver.mochi_config,
     )
     n_verts = solver.n_soft_verts
     H = qd_to_numpy(solver.mochi_state.H_dense)[0].copy()

@@ -73,12 +73,16 @@ def func_build_islands(
     has_dense: qd.template(),
     has_equalities: qd.template(),
     use_sleeping: qd.template(),
+    has_soft_variants: qd.template(),
 ):
     """Group the bodies of every running environment into islands from this step's contact candidates: the
     (link, collider) and (deformable entity, collider) pairs of the broadphase, and the deformable bodies whose
     conservative bounds overlap those of a deformable collider or of a dynamic link. Then wake the sleeping nodes that
     an awake node joined, list the degrees of freedom island by island and decide whether the environment is solved
     by the island-wise direct solver.
+
+    An absent variant of a heterogeneous deformable entity joins nothing: it is an island of its own, of fixed
+    vertices, which leaves the choice of the direct solver to the other islands.
     """
     n_nodes = island_state.nodes_parent.shape[0]
     n_dofs = island_state.dofs_node.shape[0]
@@ -135,6 +139,9 @@ def func_build_islands(
             for i_e in range(n_soft_entities):
                 if soft_info.entities_collider_type[i_e] == COLLIDER_TYPE.NONE:
                     continue
+                if qd.static(has_soft_variants):  # noqa: SIM102
+                    if not soft_info.entities_is_active[i_e, i_b]:
+                        continue
                 aabb_min = soft_state.entities_step_aabb_min[i_e, i_b]
                 aabb_max = soft_state.entities_step_aabb_max[i_e, i_b]
                 for j_e in range(n_soft_entities):
@@ -142,6 +149,9 @@ def func_build_islands(
                         continue
                     if soft_info.entities_sample_end[j_e] <= soft_info.entities_sample_start[j_e]:
                         continue
+                    if qd.static(has_soft_variants):  # noqa: SIM102
+                        if not soft_info.entities_is_active[j_e, i_b]:
+                            continue
                     if func_aabbs_overlap(
                         aabb_min,
                         aabb_max,
@@ -190,6 +200,17 @@ def func_build_islands(
                 island_state.island_start[i_isl, i_b] + island_state.island_n_dofs[i_isl, i_b]
             )
             max_dofs = qd.max(max_dofs, island_state.island_n_dofs[i_isl, i_b])
+        if qd.static(has_soft and has_soft_variants):
+            # The size of the largest island of the present bodies: an absent variant, an island of its own (its
+            # node is a root), would otherwise send the environment to the iterative solver for rows that are
+            # identities.
+            max_dofs = 0
+            for i_n in range(n_nodes):
+                if island_state.nodes_parent[i_n, i_b] != i_n:
+                    continue
+                if i_n >= n_rigid_entities and not soft_info.entities_is_active[i_n - n_rigid_entities, i_b]:
+                    continue
+                max_dofs = qd.max(max_dofs, island_state.island_n_dofs[island_state.nodes_island[i_n, i_b], i_b])
         for i_isl in range(n_nodes):
             island_state.island_n_dofs[i_isl, i_b] = 0
         for i_d in range(n_dofs):
@@ -220,6 +241,7 @@ def kernel_build_islands(
     has_dense: qd.template(),
     has_equalities: qd.template(),
     use_sleeping: qd.template(),
+    has_soft_variants: qd.template(),
 ):
     func_build_islands(
         0,
@@ -241,6 +263,7 @@ def kernel_build_islands(
         has_dense,
         has_equalities,
         use_sleeping,
+        has_soft_variants,
     )
 
 

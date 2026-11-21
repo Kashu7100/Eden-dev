@@ -122,6 +122,7 @@ from eden.engine.solvers.mochi.linear_solver import (
 from eden.engine.solvers.mochi.linear_solver_tiled import kernel_cholesky_solve_tiled
 from eden.engine.solvers.mochi.mochi_entity import MochiEntity
 from eden.engine.solvers.mochi.mochi_soft_entity import MochiSoftEntity
+from eden.engine.solvers.mochi.mochi_soft_variants import MochiSoftVariantsEntity
 from eden.engine.solvers.mochi.morphs import Rod
 from eden.engine.solvers.mochi.newton import (
     kernel_any_active,
@@ -170,8 +171,10 @@ from eden.engine.solvers.mochi.soft import (
     kernel_soft_conservative_bounds,
     kernel_soft_contact_eval,
     kernel_soft_dirichlet,
+    kernel_soft_fix_absent_variants,
     kernel_soft_get_entity_state,
     kernel_soft_get_state_render,
+    kernel_soft_get_variants_field,
     kernel_soft_get_vertices_field,
     kernel_soft_init_render,
     kernel_soft_pairs_to_blocks,
@@ -179,6 +182,10 @@ from eden.engine.solvers.mochi.soft import (
     kernel_soft_set_entity_contact_params,
     kernel_soft_set_links_pair_enabled,
     kernel_soft_set_pair_enabled,
+    kernel_soft_set_variants_positions,
+    kernel_soft_set_variants_velocities,
+    kernel_soft_set_variants_vertices_fixed,
+    kernel_soft_set_variants_vertices_target,
     kernel_soft_set_vertices_fixed,
     kernel_soft_set_vertices_positions,
     kernel_soft_set_vertices_target,
@@ -356,8 +363,11 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Allocated at build when sleeping is enabled.
         self._dofs_node = None
         self._nodes_idx = None
-        # Deformable bodies live outside the kinematic tree.
+        # Deformable bodies live outside the kinematic tree. A heterogeneous one is a scene entity owning one body of
+        # the solver per variant (see `MochiSoftVariantsEntity`).
         self._soft_entities = gs.List()
+        self._soft_variant_entities = gs.List()
+        self._soft_entities_is_active = None
         self.soft_info = None
         self.soft_state = None
         self._soft_vverts_render = None
@@ -373,40 +383,25 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         surface: "Surface",
         spec: "mochi_specs.MochiRigidSpec | mochi_specs.MochiSoftSpec | None",
         desc: "EntityDescription | None" = None,
-    ) -> "MochiEntity | MochiSoftEntity":
+    ) -> "MochiEntity | MochiSoftEntity | MochiSoftVariantsEntity":
         if desc is not None:
             spec = desc.spec
-        morph = spec.morphs[0]
-        if isinstance(morph, (gs.morphs.Terrain, gs.morphs.USD, gs.morphs.Drone)):
-            gs.raise_exception(f"Morph {type(morph).__name__} is not supported by the MochiSolver.")
+        for morph in spec.morphs:
+            if isinstance(morph, (gs.morphs.Terrain, gs.morphs.USD, gs.morphs.Drone)):
+                gs.raise_exception(f"Morph {type(morph).__name__} is not supported by the MochiSolver.")
 
         if isinstance(spec, mochi_specs.MochiSoftSpec):
-            is_rod = isinstance(spec.material, mochi_materials.Rod)
-            if not is_rod and not isinstance(
-                morph, (gs.morphs.Box, gs.morphs.Sphere, gs.morphs.Cylinder, gs.morphs.Mesh)
-            ):
-                gs.raise_exception(
-                    f"Morph {type(morph).__name__} is not supported for deformable Mochi bodies (Box, Sphere, "
-                    "Cylinder or Mesh expected)."
-                )
-            if is_rod and not isinstance(morph, Rod):
-                gs.raise_exception(
-                    "A `Rod` material (eden.engine.solvers.mochi.materials) requires a `Rod` morph "
-                    "(eden.engine.solvers.mochi.morphs)."
-                )
-            entity = MochiSoftEntity(
-                scene=self._sim.scene,
-                solver=self,
-                surface=surface,
-                spec=spec,
-                idx=idx,
-                idx_in_solver=self.n_soft_entities,
-                v_start=self.n_soft_verts,
-                vvert_start=self.n_soft_vverts,
-                vface_start=self.n_soft_vfaces,
-            )
-            self._soft_entities.append(entity)
-            return entity
+            for morph in spec.morphs:
+                self._check_soft_morph(morph, spec.material)
+            if len(spec.morphs) == 1:
+                return self._add_soft_body(idx, surface, spec)
+            # A heterogeneous body: one body of the solver per variant, owned by the scene entity
+            owner = MochiSoftVariantsEntity(scene=self._sim.scene, solver=self, surface=surface, spec=spec, idx=idx)
+            for k, morph in enumerate(spec.morphs):
+                variant_spec = spec.model_copy(update={"morph": morph, "name": f"{owner.name}/variant_{k}"})
+                owner._add_variant(self._add_soft_body(idx, surface, variant_spec))
+            self._soft_variant_entities.append(owner)
+            return owner
 
         if not isinstance(spec, mochi_specs.MochiRigidSpec):
             gs.raise_exception(
@@ -429,6 +424,37 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             else:
                 n_free_verts += link.n_verts
         self._n_free_verts, self._n_fixed_verts = n_free_verts, n_fixed_verts
+        return entity
+
+    @staticmethod
+    def _check_soft_morph(morph, material):
+        """Refuse a morph the deformable body of `material` cannot be made of."""
+        is_rod = isinstance(material, mochi_materials.Rod)
+        if not is_rod and not isinstance(morph, (gs.morphs.Box, gs.morphs.Sphere, gs.morphs.Cylinder, gs.morphs.Mesh)):
+            gs.raise_exception(
+                f"Morph {type(morph).__name__} is not supported for deformable Mochi bodies (Box, Sphere, "
+                "Cylinder or Mesh expected)."
+            )
+        if is_rod and not isinstance(morph, Rod):
+            gs.raise_exception(
+                "A `Rod` material (eden.engine.solvers.mochi.materials) requires a `Rod` morph "
+                "(eden.engine.solvers.mochi.morphs)."
+            )
+
+    def _add_soft_body(self, idx, surface, spec):
+        """Add a deformable body of one morph, the next one of the solver."""
+        entity = MochiSoftEntity(
+            scene=self._sim.scene,
+            solver=self,
+            surface=surface,
+            spec=spec,
+            idx=idx,
+            idx_in_solver=self.n_soft_entities,
+            v_start=self.n_soft_verts,
+            vvert_start=self.n_soft_vverts,
+            vface_start=self.n_soft_vfaces,
+        )
+        self._soft_entities.append(entity)
         return entity
 
     # ------------------------------------------------------------------------------------
@@ -494,6 +520,8 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
         super().build(n_envs)
         self._init_default_armature()
+        for owner in self._soft_variant_entities:
+            owner._assign_envs(self.n_envs_)
         self._external_state_dirty_mask = np.zeros((self.n_envs_,), dtype=bool)
         # Which of the two linear arms have environments to solve; refreshed at every substep by _select_linear_arms.
         self._has_dense_envs = False
@@ -587,6 +615,8 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # The base solver built the entities of the kinematic tree; the deformable ones read the arrays of `_init_soft`
         for entity in self._soft_entities:
             entity._build()
+        for owner in self._soft_variant_entities:
+            owner._build()
 
     def _create_data_manager(self):
         super()._create_data_manager()
@@ -910,6 +940,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             has_tets=self.n_soft_elems > 0,
             has_pc_colliders=self._has_pc_colliders,
             has_rod_band=any(e.is_rod and not e.morph.is_closed_loop for e in self._soft_entities),
+            has_soft_variants=self.has_soft_variants,
             has_soft_colliders=self._has_soft_colliders,
             tet_tree_levels=self.n_tet_levels,
             use_sleeping=options.use_sleeping,
@@ -1102,11 +1133,26 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             max(1, (entities_sample_range[:, 1] - entities_sample_range[:, 0]).max(initial=0))
         )
 
+        # The per-environment contact lists are sized for what one environment holds: every deformable body but the
+        # variants of a heterogeneous entity that another environment holds (all of them in a scene without one).
+        is_present = self._soft_entities_presence()
+        n_samples_present = int(
+            ((entities_sample_range[:, 1] - entities_sample_range[:, 0])[:, None] * is_present)
+            .sum(axis=0)
+            .max(initial=0)
+        )
+        n_entities_present = int(is_present.sum(axis=0).max(initial=0))
+        n_verts_present = int(
+            (np.array([entity.n_vertices for entity in entities], dtype=np.int64).reshape((-1, 1)) * is_present)
+            .sum(axis=0)
+            .max(initial=0)
+        )
+
         n_collider_geoms = sum(1 for geom in self.geoms if self._resolve_collider_type(geom) != COLLIDER_TYPE.NONE)
         self._max_soft_pairs = options.max_contact_pairs_per_env
         if self._max_soft_pairs is None:
-            self._max_soft_pairs = max(1, len(entities) * n_collider_geoms)
-        self._max_soft_hits = max(1, options.max_soft_hits_per_sample * n_samples)
+            self._max_soft_pairs = max(1, n_entities_present * n_collider_geoms)
+        self._max_soft_hits = max(1, options.max_soft_hits_per_sample * n_samples_present)
         self.n_soft_sdf_voxels_ = max(1, len(sdf_values))
 
         # Deformable colliders: the query list holds the rigid samples (dynamic links query the deformed tetrahedra
@@ -1114,7 +1160,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # located through structures rebuilt at every assembly (the flags are resolved in `_init_mochi`).
         self._n_soft_queries = self.n_samples + n_samples
         self._max_sc_hits = (
-            max(1, options.max_deformable_collider_hits_per_query * self._n_soft_queries)
+            max(1, options.max_deformable_collider_hits_per_query * (self.n_samples + n_samples_present))
             if self._has_soft_colliders
             else 1
         )
@@ -1124,10 +1170,10 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         pc_hits_per_query = options.max_point_cloud_hits_per_query
         if pc_hits_per_query is None:
             pc_hits_per_query = 4 if has_self_contact else 2
-        self._max_pc_hits = max(1, pc_hits_per_query * n_samples) if self._has_pc_colliders else 1
+        self._max_pc_hits = max(1, pc_hits_per_query * n_samples_present) if self._has_pc_colliders else 1
         bins_per_item = options.spatial_hash_bins_per_item
         # every item occupies up to eight entries (the cells its bounds overlap)
-        self.n_pc_bins_ = _next_power_of_two(bins_per_item * 8 * self.n_soft_verts) if self._has_pc_colliders else 1
+        self.n_pc_bins_ = _next_power_of_two(bins_per_item * 8 * n_verts_present) if self._has_pc_colliders else 1
         band = self._rod_band_layout()
         self.n_band_rows_ = max(1, len(band.rows_dof))
         csr = self._soft_csr_layout(
@@ -1192,10 +1238,11 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # entities only, the spheres of other point-cloud entities or of its own body under self-contact (mochi's
         # rule: point-cloud colliders only collide with each other, never with rigid bodies or solids).
         kinds = [self._soft_collider_kind(entity) for entity in entities]
+        groups = self._soft_contact_groups()
         queries_tets = np.zeros((self.n_soft_entities_,), dtype=gs.np_int)
         queries_spheres = np.zeros((self.n_soft_entities_,), dtype=gs.np_int)
         for i, entity in enumerate(entities):
-            others = [kind for j, kind in enumerate(kinds) if j != i]
+            others = [kind for j, kind in enumerate(kinds) if groups[j] != groups[i]]
             queries_tets[i] = int(any(kind == COLLIDER_TYPE.GRID for kind in others))
             queries_spheres[i] = int(
                 kinds[i] == COLLIDER_TYPE.POINT_CLOUD
@@ -1206,6 +1253,11 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             )
         self.soft_info.entities_queries_tets.from_numpy(queries_tets)
         self.soft_info.entities_queries_spheres.from_numpy(queries_spheres)
+        if self.has_soft_variants:
+            # A variant exists in the environments that hold it alone; elsewhere its vertices are fixed at rest
+            self._soft_entities_is_active = is_present
+            self.soft_info.entities_is_active.from_numpy(is_present)
+            kernel_soft_fix_absent_variants(self.soft_info, self.soft_state, self.rigid_config)
         if self.n_shell_elems > 0:
             kernel_init_shell_fields(
                 shell_elems_v, shell_elems_hinge, shell_elems_entity_idx, self.soft_info, self.rigid_config
@@ -1292,6 +1344,16 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._envs_offset = np.asarray(self._sim.scene.envs_offset, dtype=gs.np_float).reshape((_B, 3))
         if self.n_attachments > 0:
             self._init_attachments(verts_rest)
+
+    def _soft_entities_presence(self):
+        """Whether every deformable body is present in every environment, shape (n_soft_entities, n_envs_): every body
+        is but the variants of a heterogeneous entity, each in the environments assigned to it.
+        """
+        is_present = np.ones((self.n_soft_entities, self.n_envs_), dtype=bool)
+        for owner in self._soft_variant_entities:
+            for k, body in enumerate(owner.variants):
+                is_present[body.idx_in_solver] = owner._envs_variant_idx_np == k
+        return is_present
 
     @staticmethod
     def _shell_hinges(entity):
@@ -1645,11 +1707,22 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         entities = self._soft_entities
         kinds = [self._soft_collider_kind(entity) for entity in entities]
         has_self_contact = any((e.is_shell or e.is_rod) and e.material.self_contact for e in entities)
-        has_queries = self.n_samples > 0 or len(entities) > 1
+        # The variants of a heterogeneous entity are never present in the same environment, so they never meet: they
+        # count as one body here
+        groups = self._soft_contact_groups()
+        has_queries = self.n_samples > 0 or len(set(groups)) > 1
         self._has_soft_colliders = has_queries and any(kind == COLLIDER_TYPE.GRID for kind in kinds)
-        n_pc = sum(1 for kind in kinds if kind == COLLIDER_TYPE.POINT_CLOUD)
+        n_pc = len({group for group, kind in zip(groups, kinds) if kind == COLLIDER_TYPE.POINT_CLOUD})
         self._has_pc_colliders = n_pc > 1 or (n_pc > 0 and has_self_contact)
         self._build_tet_tree(kinds)
+
+    def _soft_contact_groups(self):
+        """The contact group of every deformable body: its heterogeneous entity for a variant, the body itself
+        otherwise. Two bodies of one group are never present in the same environment.
+        """
+        return [
+            id(entity.variants_owner if entity.variants_owner is not None else entity) for entity in self._soft_entities
+        ]
 
     def _build_tet_tree(self, kinds):
         """Bounding-box hierarchy over the collider tetrahedra, built over the rest shape (see tet_tree.py); the
@@ -1962,6 +2035,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.soft_info,
                 self.soft_state,
                 self.rigid_config,
+                self.mochi_config,
                 self._errno,
             )
         kernel_build_islands(
@@ -1980,6 +2054,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self.mochi_config.has_dense,
             self.mochi_config.has_equalities,
             self.mochi_config.use_sleeping,
+            self.mochi_config.has_soft_variants,
         )
         self._select_linear_arms()
         self._newton_solve()
@@ -2068,7 +2143,14 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self._errno,
             )
             if self._has_pc_colliders:
-                kernel_pc_hash_build(self.mochi_state, self.soft_info, self.soft_state, self.rigid_config, skip_ls_done)
+                kernel_pc_hash_build(
+                    self.mochi_state,
+                    self.soft_info,
+                    self.soft_state,
+                    self.rigid_config,
+                    self.mochi_config,
+                    skip_ls_done,
+                )
                 kernel_pc_collider_eval(
                     self.dyn_state,
                     self.dyn_info,
@@ -2220,6 +2302,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.soft_info,
                     self.soft_state,
                     self.rigid_config,
+                    self.mochi_config,
                     assem_obj,
                     assem_res,
                     assem_dres,
@@ -2303,6 +2386,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                     self.soft_state,
                     self.island_state,
                     self.rigid_config,
+                    self.mochi_config,
                 )
             if self.mochi_config.use_tiled_cholesky:
                 kernel_cholesky_solve_tiled(self.mochi_info, self.mochi_state, self.island_state, self.mochi_config)
@@ -2401,7 +2485,8 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def get_soft_state_render(self):
         """Environment-offset render vertex positions of the deformable surfaces, shape (n_vverts, B), as (positions,
-        None, None) (UVs and faces are read from the visual geoms).
+        None, None) (UVs and faces are read from the visual geoms). A variant of a heterogeneous entity collapses to
+        one point in the environments where it is absent (see `soft_entities_is_active`).
         """
         if not self.has_soft or self.n_soft_vverts == 0:
             return None, None, None
@@ -2414,6 +2499,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             self.soft_info,
             self.soft_state,
             self.rigid_config,
+            self.mochi_config.has_soft_variants,
         )
         if self._n_rod_vverts > 0:
             kernel_rod_get_state_render(
@@ -2426,6 +2512,7 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.soft_info,
                 self.soft_state,
                 self.rigid_config,
+                self.mochi_config.has_soft_variants,
             )
         return self._soft_vverts_render, None, None
 
@@ -2593,6 +2680,8 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         super().destroy()
         for entity in self._soft_entities:
             entity._destroy()
+        for owner in self._soft_variant_entities:
+            owner._destroy()
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- contact API ------------------------------------
@@ -3031,18 +3120,27 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @mutates(StateChange.MODEL)
     def enable_entity_contact(self, entity_a, entity_b, is_enabled: bool = True):
-        """Enable or disable contact between two entities (symmetric)."""
-        is_soft_a = isinstance(entity_a, MochiSoftEntity)
-        is_soft_b = isinstance(entity_b, MochiSoftEntity)
-        i_a, i_b = entity_a._idx_in_solver, entity_b._idx_in_solver
-        if is_soft_a and is_soft_b:
-            self._soft_entities_pair_enabled[i_a, i_b] = self._soft_entities_pair_enabled[i_b, i_a] = is_enabled
-        elif is_soft_a:
-            self._soft_rigid_entities_pair_enabled[i_a, i_b] = is_enabled
-        elif is_soft_b:
-            self._soft_rigid_entities_pair_enabled[i_b, i_a] = is_enabled
-        else:
-            self._entities_pair_enabled[i_a, i_b] = self._entities_pair_enabled[i_b, i_a] = is_enabled
+        """Enable or disable contact between two entities (symmetric). A heterogeneous deformable entity sets it for
+        every one of its variants.
+        """
+
+        def bodies(entity):
+            return entity.variants if isinstance(entity, MochiSoftVariantsEntity) else (entity,)
+
+        for body_a in bodies(entity_a):
+            for body_b in bodies(entity_b):
+                is_soft_a = isinstance(body_a, MochiSoftEntity)
+                is_soft_b = isinstance(body_b, MochiSoftEntity)
+                i_a, i_b = body_a._idx_in_solver, body_b._idx_in_solver
+                if is_soft_a and is_soft_b:
+                    self._soft_entities_pair_enabled[i_a, i_b] = is_enabled
+                    self._soft_entities_pair_enabled[i_b, i_a] = is_enabled
+                elif is_soft_a:
+                    self._soft_rigid_entities_pair_enabled[i_a, i_b] = is_enabled
+                elif is_soft_b:
+                    self._soft_rigid_entities_pair_enabled[i_b, i_a] = is_enabled
+                else:
+                    self._entities_pair_enabled[i_a, i_b] = self._entities_pair_enabled[i_b, i_a] = is_enabled
         kernel_set_links_pair_enabled(self._compute_links_pair_enabled(), self.mochi_info, self.rigid_config)
         if self.has_soft:
             kernel_soft_set_links_pair_enabled(
@@ -3111,7 +3209,24 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     @property
     def soft_entities(self):
+        """The deformable bodies of the solver: every variant of a heterogeneous entity is one of them."""
         return self._soft_entities
+
+    @property
+    def soft_variant_entities(self):
+        """The heterogeneous deformable entities (`MochiSoftVariantsEntity`), each owning some of `soft_entities`."""
+        return self._soft_variant_entities
+
+    @property
+    def has_soft_variants(self):
+        return len(self._soft_variant_entities) > 0
+
+    @property
+    def soft_entities_is_active(self):
+        """Whether every deformable body is present in every environment, shape (n_soft_entities, n_envs) on the host,
+        once built. Every body is but the variants of a heterogeneous entity; None when the solver holds none.
+        """
+        return self._soft_entities_is_active
 
     @property
     def n_soft_entities(self):
@@ -3190,6 +3305,44 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # Setting the configuration of a deformable body clears the error of its environments, as `set_qpos` does.
         self.clear_errno(envs_idx)
         self._is_contacts_recorded = False
+
+    def get_soft_variants_field(self, owner, field, envs_idx):
+        """A vertex field of the variant every environment of `envs_idx` holds, shape (len(envs_idx), n_vertices, 3),
+        zero past that variant's vertices.
+        """
+        out = torch.empty((len(envs_idx), owner.n_vertices, 3), dtype=gs.tc_float, device=gs.device)
+        kernel_soft_get_variants_field(
+            envs_idx, owner._envs_v_start, owner._envs_n_vertices, out, field, self.rigid_config
+        )
+        return out
+
+    def set_soft_variants_position(self, owner, pos, envs_idx):
+        kernel_soft_set_variants_positions(
+            envs_idx, owner._envs_v_start, owner._envs_n_vertices, pos, self.soft_state, self.rigid_config
+        )
+        self._mark_external_state_dirty(envs_idx)
+        self.clear_errno(envs_idx)
+        self._is_contacts_recorded = False
+
+    def set_soft_variants_velocity(self, owner, vel, envs_idx):
+        kernel_soft_set_variants_velocities(
+            envs_idx, owner._envs_v_start, owner._envs_n_vertices, vel, self.soft_state, self.rigid_config
+        )
+        self._mark_external_state_dirty(envs_idx)
+
+    def set_soft_variants_vertices_fixed(self, owner, verts_idx, is_fixed, envs_idx):
+        kernel_soft_set_variants_vertices_fixed(
+            envs_idx, owner._envs_v_start, verts_idx, int(bool(is_fixed)), self.soft_state, self.rigid_config
+        )
+        self._mark_external_state_dirty(envs_idx)
+
+    def set_soft_variants_vertices_target(self, owner, verts_idx, pos, envs_idx):
+        kernel_soft_set_variants_vertices_target(
+            envs_idx, owner._envs_v_start, verts_idx, pos, self.soft_state, self.rigid_config
+        )
+        if self.mochi_config.use_sleeping:
+            nodes = [len(self._entities) + body.idx_in_solver for body in owner.variants]
+            self._wake_nodes(self._nodes_idx[nodes], self._nodes_idx, envs_idx)
 
     def set_soft_vertices_velocity(self, entity, vel, envs_idx=None):
         envs_idx, vel = self._soft_values_of_entity(entity, vel, envs_idx)
