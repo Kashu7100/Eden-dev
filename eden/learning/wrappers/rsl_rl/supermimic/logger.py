@@ -111,12 +111,24 @@ class RunLogger:
         if self._wandb is not None:
             self._wandb.log(scalars, step=it)
         else:
-            for key, value in scalars.items():
-                self._writer.add_scalar(key, value, it)
+            self._write_scalars(scalars, it)
         width, pad = 80, 40
         lines = [f"{'#' * width}", f"\033[1m{f' Learning iteration {it}/{total_it} '.center(width)}\033[0m", ""]
         lines += [f"{f'{key}:':>{pad}} {value:.4f}" for key, value in scalars.items()]
         print("\n".join(lines))
+
+    def _write_scalars(self, scalars: dict[str, float], step: int) -> None:
+        """Write an iteration's scalars to TensorBoard as one event holding every tag.
+
+        ``SummaryWriter.add_scalar`` writes one event per scalar, and the writer appends each event to the file with
+        an open and a close: about 40 per iteration, 12 ms on a network file system, which the next ``add_scalar``
+        waits for once ten are pending. TensorBoard reads the tags of one event as it reads those of forty.
+        """
+        from tensorboard.compat.proto.summary_pb2 import Summary
+        from torch.utils.tensorboard.summary import scalar
+
+        values = [value for key, x in scalars.items() for value in scalar(key, x).value]
+        self._writer._get_file_writer().add_summary(Summary(value=values), step)
 
     def close(self) -> None:
         if self._writer is not None:
