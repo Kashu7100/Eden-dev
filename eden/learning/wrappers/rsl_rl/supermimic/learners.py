@@ -341,6 +341,7 @@ class PolicyLearner:
         self.critic_optimizers = build_optimizers([critic], options.lr, device=device) if critic is not None else []
         on_cuda = torch.device(device).type == "cuda"
         self._rollout_actor = torch.compile(actor) if on_cuda else actor
+        self._critic_loss = torch.compile(self._critic_loss_eager) if on_cuda else self._critic_loss_eager
         self._update = CapturedUpdate(self._update_from, self._graph_state)
 
     def update(self, starts: Iterable[TensorDict]) -> dict[str, torch.Tensor]:
@@ -429,10 +430,13 @@ class PolicyLearner:
         batches = [(obs[idx], returns[idx]) for idx in perm.view(4, -1)]
         for _ in range(5):
             for batch_obs, batch_returns in batches:
-                loss = (batch_returns - self.critic(batch_obs)).pow(2).mean()
+                loss = self._critic_loss(batch_obs, batch_returns)
                 optimize(self.critic_optimizers, loss, self.critic.parameters(), max_norm=1.0)
                 losses.append(loss.detach())
         return torch.stack(losses).mean()
+
+    def _critic_loss_eager(self, obs: torch.Tensor, returns: torch.Tensor) -> torch.Tensor:
+        return (returns - self.critic(obs)).pow(2).mean()
 
     def _graph_state(self) -> list[torch.Tensor]:
         modules = [self.actor, self.wm_env.dynamics]
