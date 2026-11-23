@@ -12,7 +12,13 @@ from tensordict import TensorDict
 import eden as en
 from eden.envs.wrappers.rsl_rl_env import EDEN_RUNNER_MIXINS
 from eden.learning.wrappers.rsl_rl.supermimic.goals import motion_goal_spec, velocity_goal_spec
-from eden.learning.wrappers.rsl_rl.supermimic.learners import PolicyLearner, WorldModelLearner, load_optimizer_state
+from eden.learning.wrappers.rsl_rl.supermimic.learners import (
+    CapturedUpdate,
+    PolicyLearner,
+    WorldModelLearner,
+    graph_state,
+    load_optimizer_state,
+)
 from eden.learning.wrappers.rsl_rl.supermimic.logger import RunLogger
 from eden.learning.wrappers.rsl_rl.supermimic.mirror import Mirror
 from eden.learning.wrappers.rsl_rl.supermimic.models import Dynamics, MultiEncoderActor, build_mlp
@@ -131,7 +137,9 @@ class _SuperMimicRunner:
         #: Allocated by :meth:`learn`; a runner built to replay a checkpoint holds no transitions.
         self.replay_buffer: ReplayBuffer | None = None
         self._history: torch.Tensor | None = None
-        self._pending: list[tuple[torch.Tensor, torch.Tensor, TensorDict]] = []
+        #: The policy's part of a collected step (:meth:`_act_from`), replayed from a CUDA graph. The host does not
+        #: wait for it: the env step that follows queues behind it.
+        self._act = CapturedUpdate(self._act_from, lambda: graph_state([self.actor, self.dynamics], []), wait=False)
         #: Reset bins of a loaded checkpoint whose return sampler does not fit this run's library (:meth:`load`).
         self._stale_sampler_bins: int | None = None
         #: The iteration from which ``policy.lr_multiplier`` ramps to 1; ``None`` until the ramp starts.
@@ -288,10 +296,16 @@ class _SuperMimicRunner:
         return self.representation.add_proprio_noise(sensor) if training else sensor
 
     def _policy_input(
-        self, state: torch.Tensor, sensor: torch.Tensor, frames: torch.Tensor, training: bool = True
+        self,
+        state: torch.Tensor,
+        sensor: torch.Tensor,
+        frames: torch.Tensor,
+        training: bool = True,
+        history: torch.Tensor | None = None,
     ) -> TensorDict:
         """The actor's input. While training it holds the goal of every interface with a share of the batch; at
-        inference the motion goal alone.
+        inference the motion goal alone. ``history`` is the proprioception history to read; ``None`` reads the
+        runner's.
         """
         aux = self.representation.aux_state(state)
         specs = self.active_specs if training else [s for s in self.active_specs if s.name == "motion"]
@@ -300,7 +314,7 @@ class _SuperMimicRunner:
             history = self.representation.represent(state).unsqueeze(1)
         elif self.options.policy.history_length == 1:
             history = self._sensed(sensor, training).unsqueeze(1)
-        else:
+        elif history is None:
             history = self._history
         reference = None
         if self.options.policy.reference_action:
@@ -325,9 +339,11 @@ class _SuperMimicRunner:
         base = self.env.unwrapped
         with torch.inference_mode():
             state, sensor, frames, sim_ctx = self._observe(obs)
-            actor_in = self._policy_input(state, sensor, frames)
-            self.actor.eval()
-            actions = self.actor(actor_in)
+            acting = {"state": state, "sensor": sensor, "frame": frames}
+            if self._stores_sensor:
+                acting["history"] = self._history
+            # A replay overwrites the action it returns, which the action manager and the replay buffer keep.
+            actions = self._act(TensorDict(acting, batch_size=[self.num_envs]))["action"].clone()
             prev_action = base.action_manager.action.clone()
             next_obs, rewards, dones, extras = self.env.step(actions)
             truncated = extras["time_outs"].to(self.device, torch.bool)
@@ -343,7 +359,6 @@ class _SuperMimicRunner:
             if self._stores_sensor:
                 step["actor_obs"] = sensor
             self.replay_buffer.insert(TensorDict(step, batch_size=[self.num_envs]))
-            self._pending.append((state.clone(), actions.clone(), actor_in.clone()))
             self._advance_history(next_obs[self.options.actor_observation_group].to(self.device), dones)
             self.logger.process_env_step(rewards, dones, extras)
             self._record_returns(rewards, dones.bool())
@@ -354,8 +369,24 @@ class _SuperMimicRunner:
                 )
                 if weights is not None:
                     self.motion.set_reset_distribution(weights)
-        self._flush_normalization()
         return next_obs
+
+    def _act_from(self, inputs: TensorDict) -> dict[str, torch.Tensor]:
+        """The deterministic policy's action for a collected step, then that step folded into the running
+        normalizers of the world model and the actor: the action reads the statistics of the steps before it.
+
+        A few hundred small kernels on fixed shapes with no host read, which on CUDA replay from one graph
+        (:class:`~eden.learning.wrappers.rsl_rl.supermimic.learners.CapturedUpdate`). A replay runs no Python, so
+        the actor's mode stays as the last eager call left it, train.
+        """
+        state = inputs["state"]
+        actor_in = self._policy_input(state, inputs["sensor"], inputs["frame"], history=inputs.get("history", None))
+        self.actor.eval()
+        actions = self.actor(actor_in)
+        self.world_model_learner.update_normalization(state, actions)
+        self.actor.train()
+        self.actor.update_normalization(actor_in)
+        return {"action": actions}
 
     def _record_returns(self, rewards: torch.Tensor, ended: torch.Tensor) -> None:
         """Add one env step to each env's episode and, for an episode that ended, its normalized return (summed
@@ -431,14 +462,6 @@ class _SuperMimicRunner:
                 "they entered the replay buffer and the running statistics. The simulation or the policy "
                 "diverged; runner_options.check_for_nan=False skips this check."
             )
-
-    def _flush_normalization(self) -> None:
-        states, actions, actor_inputs = zip(*self._pending, strict=True)
-        self.world_model_learner.update_normalization(torch.cat(states), torch.cat(actions))
-        self.actor.train()
-        for actor_in in actor_inputs:
-            self.actor.update_normalization(actor_in)
-        self._pending.clear()
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         """Run ``num_learning_iterations`` iterations from the current one. Episodes start where the reset sampler

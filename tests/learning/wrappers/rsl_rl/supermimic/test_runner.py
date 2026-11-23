@@ -59,6 +59,22 @@ def test_it_trains_and_a_checkpoint_restores_the_policy(runner, tmp_path):
     assert runner.current_learning_iteration == 3
 
 
+def test_a_collected_step_acts_on_the_statistics_before_it_and_folds_itself_in_once(runner):
+    if runner.replay_buffer is None:
+        runner.replay_buffer = runner._make_replay_buffer()
+    obs = runner.env.get_observations()
+    with torch.inference_mode():
+        state, sensor, frames, _ = runner._observe(obs)
+        expected = runner.actor.eval()(runner._policy_input(state, sensor, frames))
+    folded = [runner.dynamics.state_normalizer, runner.dynamics.action_normalizer, runner.actor.obs_normalizer]
+    counts = [int(normalizer.count) for normalizer in folded]
+    runner._collect(obs)
+    buffer = runner.replay_buffer
+    stored = buffer._storage["action"][:, (buffer._step - 1) % buffer.buffer_size]
+    torch.testing.assert_close(stored, expected)
+    assert [int(normalizer.count) for normalizer in folded] == [count + runner.num_envs for count in counts]
+
+
 def test_a_checkpoint_restores_the_return_sampler_without_the_optimizers(runner, tmp_path):
     path = str(tmp_path / "model.pt")
     runner.save(path)

@@ -138,6 +138,9 @@ class CapturedUpdate:
     captured updates on a device record on one stream into one memory pool and replay in the order they were
     recorded. A replay raises if a tensor in ``state()`` moved, so a checkpoint's optimizer state is loaded into
     the existing tensors (:func:`load_optimizer_state`). On the CPU ``fn`` always runs eagerly.
+
+    A call returns once the replay is done, so the time around it is the update's. ``wait=False`` returns as soon
+    as the replay is queued: later work on the stream runs after it, and the host goes on meanwhile.
     """
 
     def __init__(
@@ -145,10 +148,12 @@ class CapturedUpdate:
         fn: Callable[[TensorDict], dict[str, torch.Tensor]],
         state: Callable[[], list[torch.Tensor]],
         warmup: int = 3,
+        wait: bool = True,
     ):
         self._fn = fn
         self._state = state
         self._warmup = warmup
+        self._wait = wait
         self._inputs: TensorDict | None = None
         self._graph: torch.cuda.CUDAGraph | None = None
         self._identity: list[int] = []
@@ -179,7 +184,8 @@ class CapturedUpdate:
             elif [x.data_ptr() for x in state] != self._identity:
                 raise RuntimeError("a tensor read by a captured update moved; update it in place instead.")
             self._graph.replay()
-            torch.cuda.current_stream().synchronize()
+            if self._wait:
+                torch.cuda.current_stream().synchronize()
             return self._outputs
 
 
