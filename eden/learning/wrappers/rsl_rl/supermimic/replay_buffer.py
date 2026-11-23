@@ -34,6 +34,9 @@ class ReplayBuffer:
         self.device = device
         self.num_transitions = 0
         self._step = 0
+        #: Writes so far, and per sequence length the valid windows counted at that many writes.
+        self._writes = 0
+        self._windows: dict[int, tuple[int, torch.Tensor, bool]] = {}
         self._storage = TensorDict(
             {
                 name: torch.zeros(s.shape(num_envs, buffer_size), dtype=s.dtype, device=device)
@@ -49,6 +52,7 @@ class ReplayBuffer:
                 f"step fields {sorted(step.keys())} differ from the schema {sorted(self._storage.keys())}."
             )
         self._storage[:, self._step] = step
+        self._writes += 1
         self._step = (self._step + 1) % self.buffer_size
         self.num_transitions = min(self.buffer_size, self.num_transitions + 1)
 
@@ -59,28 +63,36 @@ class ReplayBuffer:
         """
         if self.num_transitions:
             self._storage["truncated"][:, (self._step - 1) % self.buffer_size] = True
+            self._writes += 1
 
     def _base(self) -> int:
         """The slot of the oldest stored step: slot = (base + age) % buffer_size."""
         return self._step if self.num_transitions == self.buffer_size else 0
 
-    def _valid_windows(self, sequence_length: int) -> torch.Tensor:
+    def _valid_windows(self, sequence_length: int) -> tuple[torch.Tensor, bool]:
         """``(num_envs, buffer_size)`` cumulative count, by age of the first step, of the windows of
-        ``sequence_length`` steps with no episode end before their last step.
+        ``sequence_length`` steps with no episode end before their last step, and whether there is any.
+
+        Counted once per write: the samples drawn between two writes share the count and its one host read.
         """
         L, E, T, n = sequence_length, self.num_envs, self.buffer_size, self.num_transitions
         if L > T:
             raise ValueError(f"sequence_length {L} exceeds buffer_size {T}.")
+        cached = self._windows.get(L)
+        if cached is not None and cached[0] == self._writes:
+            return cached[1], cached[2]
         ages = torch.arange(T, device=self.device)
         ended = (self._storage["terminated"] | self._storage["truncated"])[:, (self._base() + ages) % T].long()
         # Window [a, a+L-1] has no end before its last step iff the end count over [a, a+L-2] is zero.
         c = torch.cat([ended.new_zeros(E, 1), ended.cumsum(1), ended.new_zeros(E, L - 1)], dim=1)
         valid = (c[:, L - 1 : L - 1 + T] == c[:, :T]) & (ages + L - 1 < n)
-        return valid.cumsum(dim=1)
+        csum = valid.cumsum(dim=1)
+        self._windows[L] = (self._writes, csum, bool((csum[:, -1] > 0).any()))
+        return self._windows[L][1:]
 
     def has_window(self, sequence_length: int) -> bool:
         """Whether :meth:`sample` has a window of ``sequence_length`` steps to draw."""
-        return bool((self._valid_windows(sequence_length)[:, -1] > 0).any())
+        return self._valid_windows(sequence_length)[1]
 
     def sample(self, sequence_length: int, batch_size: int) -> TensorDict:
         """``(batch_size, sequence_length)`` windows of consecutive steps that no episode end interrupts.
@@ -91,9 +103,9 @@ class ReplayBuffer:
         """
         L, B, T, n = sequence_length, batch_size, self.buffer_size, self.num_transitions
         base, dev = self._base(), self.device
-        csum = self._valid_windows(L)
+        csum, any_window = self._valid_windows(L)
         total = csum[:, -1]
-        if not bool((total > 0).any()):
+        if not any_window:
             raise RuntimeError(
                 f"no window of {L} steps without an episode end among {n} stored steps. Check has_window({L}) "
                 "before sampling."
