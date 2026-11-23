@@ -80,7 +80,7 @@ def optimize(
     if before is not None:
         with torch.no_grad():
             for param, start in zip(params, before, strict=True):
-                param.copy_(torch.lerp(start, param, lr_scale))
+                torch.lerp(start, param, lr_scale, out=param)
     return grad_norm
 
 
