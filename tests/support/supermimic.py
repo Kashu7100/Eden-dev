@@ -35,10 +35,10 @@ def write_lafan1_library(root: Path) -> Path:
     return write_lafan1_csv_library(root, list(CLIP_FRAMES), joints_center=_knees_bent())
 
 
-def supermimic_config(library: Path, *, rsi_noise: bool = True):
+def supermimic_config(library: Path, *, rsi_noise: bool = True, recipe: str = "supermimic"):
     from eden.tasks import TASK_REGISTRY
 
-    cfg = TASK_REGISTRY.build("supermimic", raw_data_path=str(library))
+    cfg = TASK_REGISTRY.build("supermimic", raw_data_path=str(library), recipe=recipe)
     cfg.env_options.num_envs = NUM_ENVS
     if not rsi_noise:
         rsi = cfg.event_options.reset_from_motion
