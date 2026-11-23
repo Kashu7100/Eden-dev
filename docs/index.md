@@ -386,6 +386,8 @@ Eden builds on these open-source projects:
   reference environments for human motion priors.
 - [Holosoma](https://github.com/amazon-far/holosoma) and
   [InstinctLab](https://github.com/project-instinct/InstinctLab): reference end-to-end humanoid frameworks.
+- [project_superdex](https://github.com/facebookresearch/project_superdex): the original implementation of the Mochi
+  solver.
 
 ## Citation
 
