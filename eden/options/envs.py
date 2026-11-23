@@ -42,12 +42,17 @@ class CudaGraphOptions(ConfigurableOptions):
         change (a curriculum switching stage) re-captures once, but something that changes a baked-in value on
         nearly every step would re-capture and re-validate every step, which costs more than the eager phase.
         Defaults to 2.
+    require_cuda: bool
+        Raise at build when the env is not on a CUDA device. ``False`` runs the graded phase eagerly there
+        instead, for a task config that turns the graph on and must also build on a CPU or Metal host.
+        Defaults to True.
     """
 
     warmup_steps: PositiveInt = 2
     validation_steps: PositiveInt = 3
     recapture_window: PositiveInt = 100
     max_recaptures_per_window: NonNegativeInt = 2
+    require_cuda: bool = True
 
 
 class EnvOptions(ConfigurableOptions):
@@ -229,9 +234,10 @@ class EnvOptions(ConfigurableOptions):
         hundreds of small kernels, and on a host-bound step the launches are the cost: on BeyondMimic at
         4096 envs the phase takes ~3 ms of host time eagerly, against ~5 µs for the replay plus ~70 µs for
         the checks before it (see ``docs/guides/environments.md``). CUDA only (a CPU or Metal
-        backend raises at build), and only an ``RLEnvBase`` has a graded phase (any other env raises at
-        construction). A training-throughput switch: the replay commands (``eden inference``,
-        ``eden export``, ``eden deploy``) reset it in a run's config (see :attr:`training_only_fields`).
+        backend raises at build, or runs the phase eagerly with ``CudaGraphOptions(require_cuda=False)``),
+        and only an ``RLEnvBase`` has a graded phase (any other env raises at construction). A
+        training-throughput switch: the replay commands (``eden inference``, ``eden export``,
+        ``eden deploy``) reset it in a run's config (see :attr:`training_only_fields`).
 
     coupler_options : gs.options.BaseCouplerOptions | None = None
         The options configuring the coupler. Defaults to None (LegacyCouplerOptions).
