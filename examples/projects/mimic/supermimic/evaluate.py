@@ -13,10 +13,13 @@ Each clip gets one env, which starts on the clip's first frame without reset noi
 (a success) or the robot falls (a termination). The script reports the failures and two tracking errors averaged
 over each clip's steps: the mean per-body position error of the tracked bodies relative to the root (MPJPE, mm) and
 the mean joint angle error (rad). Randomization of friction, centre of mass and encoder bias stays as in training.
+A checkpoint trained with ``--recipe blinkmimic`` needs the same flag here, which builds its networks and plays the
+average of the actor.
 
 Usage::
 
     python examples/projects/mimic/supermimic/evaluate.py --checkpoint logs/supermimic/<run>/model_20000.pt
+    python examples/projects/mimic/supermimic/evaluate.py --checkpoint model.pt --recipe blinkmimic
     python examples/projects/mimic/supermimic/evaluate.py --checkpoint model.pt --dataset bones_seed \\
         --raw-data-path /data/bones_seed/g1/csv --processed-data-path /data/bones_seed_g1.pt \\
         --clip-list bones_seed_2000_clips.json -b 2000 -o bones_seed_benchmark.json
@@ -39,6 +42,12 @@ def main() -> None:
     parser.add_argument("--raw-data-path", type=str, default=None, help="The library's CSV clips.")
     parser.add_argument("--processed-data-path", type=str, default=None, help="Cache of the prepared library.")
     parser.add_argument("--clip-list", type=str, default=None, help="Clips to play (.json/.yaml list).")
+    parser.add_argument(
+        "--recipe",
+        type=str,
+        default="supermimic",
+        help="The recipe the checkpoint trained with: supermimic or blinkmimic.",
+    )
     parser.add_argument("-b", "--num-envs", type=int, default=64, help="Envs, at least one per clip.")
     parser.add_argument("-o", "--output", type=str, default=None, help="Per-clip results (.json).")
     parser.add_argument("-c", "--cpu", action="store_true", help="Run on the CPU.")
@@ -55,6 +64,7 @@ def main() -> None:
         raw_data_path=args.raw_data_path,
         processed_data_path=args.processed_data_path,
         clip_list=args.clip_list,
+        recipe=args.recipe,
     )
     rsi = cfg.event_options.reset_from_motion
     rsi.pose_range, rsi.velocity_range, rsi.dofs_position_range = {}, {}, (0.0, 0.0)

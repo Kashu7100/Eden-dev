@@ -59,6 +59,47 @@ Measured on LAFAN1 with the default options, one L40S and one seed:
 
 The run took 53 minutes with startup. The default 20,000 iterations take about 8 hours at that rate.
 
+## BlinkMimic recipe
+
+[BlinkMimic](https://github.com/fuyichen0725/blinkmimic) (F. Chen, 2026) trains the same tracker through the same
+kind of world model, and its README reports SuperMimic's tracking quality after fewer updates. `--recipe blinkmimic`
+selects the learner-side part of its released recipe (`PRESET[main]` in its `scripts/presets.sh`):
+
+```bash
+eden train --task supermimic --recipe blinkmimic --processed_data_path /data/lafan1_g1.pt
+```
+
+The recipe sets the options below, and `--override` sets any of them on its own.
+
+| Option (under `runner_options`) | Default | Recipe | What it does |
+|---|---|---|---|
+| `policy.ema_decay` | 0 | 0.995 | Replay and evaluation run a Polyak average of the actor; collection keeps the trained actor |
+| `policy.reference_action` | `false` | `true` | The actor's output is added to the action that commands the next reference pose, so the network learns a correction to it |
+| `policy.lr_multiplier` | 1 | 4 | The actor's learning rate is this multiple of `policy.lr` |
+| `policy.lr_decay_return`, `lr_decay_deadline`, `lr_decay_iterations` | none, none, 75 | 0.75, 350, 75 | Once `Train/mean_normalized_return` reaches 0.75, or at iteration 350, the multiplier ramps to 1 over 75 iterations |
+| `policy.batch_size`, `policy.lr` | 4096, 2e-4 | 2048, 4e-4 | Half the imagined rollouts per actor step |
+| `world_model.hidden_dims`, `num_batches`, `lr` | 3 × 2048, 10, 2e-4 | 3 × 1024, 5, 4e-4 | A smaller world model fit on half the batches |
+| `world_model.mirror_share` | 0 | 0.5 | Half of every world-model batch is replaced by its left-right mirror image |
+| `return_sampler.failure` | 0 | 0.3 | 30% of the resets start up to 1 s (`failure_lead_s`) before the frames of recent falls |
+| `return_sampler.explore`, `keep` | 0.5, 0.1 | 0.35, 0.07 | The other 70% of the resets keep their split |
+| `replay_ratio` | 16 | 8 | With 5 world-model batches, still 0.4 update rounds per env step |
+
+`Train/mean_normalized_return` is the mean, over the episodes that ended in an iteration, of the episode's reward
+per step over the largest reward of one step. BlinkMimic logs the same quantity as `ep_ret_norm`.
+
+BlinkMimic counts iterations in update rounds. This task runs 4 rounds per iteration at 4096 envs, so BlinkMimic's
+3500 iterations are 875 here, and its learning-rate deadline of 1400 and ramp of 300 are the 350 and 75 above. The
+recipe leaves `max_iterations` alone; pass `--override "runner_options: {max_iterations: 875}"` for a run of
+BlinkMimic's length.
+
+The default recipe already optimizes with Muon, replays its updates as CUDA graphs, integrates poses from predicted
+velocity changes and starts policy updates with the first world-model update, as BlinkMimic's recipe does.
+BlinkMimic's world model also predicts a position correction on top of the integrated pose, which this one does
+not. BlinkMimic's contact reward, its evaluation-guided resets and its capture of the simulator step are not ported.
+
+> **TODO (timing):** training time and return of `--recipe blinkmimic` against the default recipe, on one GPU and
+> one seed. Not measured yet.
+
 ## Evaluate
 
 Play every clip once from its first frame, without reset noise, and count the falls:
@@ -69,7 +110,10 @@ python examples/projects/mimic/supermimic/evaluate.py --checkpoint logs/supermim
 ```
 
 Replay (`eden inference` and this script) drives every environment through the motion encoder, whatever `slot_mix`
-the checkpoint trained on, and reads the proprioception without the training sensor noise.
+the checkpoint trained on, and reads the proprioception without the training sensor noise. `eden inference` rebuilds
+the learner from the run's `config.json`. This script builds the task anew, so a checkpoint trained with
+`--recipe blinkmimic` needs `--recipe blinkmimic` here too; without it the load stops and names the options that
+differ.
 
 ## Options
 
