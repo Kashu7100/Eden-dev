@@ -7,9 +7,9 @@ its options class lives here and :func:`eden.engine.solvers.mochi.hosting.instal
 from typing import Any, Literal
 
 import genesis as gs
-from genesis.options.solvers import GravityMixin, TimeBasedMixin
+from genesis.options.solvers import GravityMixin, KinematicVisOptions, TimeBasedMixin
 from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitInterval
-from pydantic import StrictBool
+from pydantic import Field, StrictBool
 
 
 class MochiOptions(GravityMixin, TimeBasedMixin):
@@ -196,6 +196,9 @@ class MochiOptions(GravityMixin, TimeBasedMixin):
     IK_max_targets : int, optional
         Maximum number of simultaneous target links of an inverse-kinematics solve (the scratch buffers are quadratic
         in it and allocated at the first solve). Defaults to 6.
+    vis : gs.options.KinematicVisOptions, optional
+        The markers the interactive viewer and the debug cameras draw for the solver's links (their frames), as for a
+        kinematic solver. Defaults to KinematicVisOptions().
     """
 
     IK_max_targets: PositiveInt = 6
@@ -244,6 +247,7 @@ class MochiOptions(GravityMixin, TimeBasedMixin):
     batch_links_info: StrictBool = False
     batch_joints_info: StrictBool = False
     batch_dofs_info: StrictBool = False
+    vis: KinematicVisOptions = Field(default_factory=KinematicVisOptions)
 
     def model_post_init(self, context: Any) -> None:
         if not (0.0 < self.linesearch_alpha < 1.0):
