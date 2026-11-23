@@ -61,12 +61,15 @@ class RunLogger:
             self._episode_logs.append(extras["log"])
         self._reward_sum += rewards
         self._length += 1
-        done = dones.nonzero(as_tuple=False)[:, 0]
-        if done.numel():
-            self.rewbuffer.extend(self._reward_sum[done].tolist())
-            self.lenbuffer.extend(self._length[done].tolist())
-            self._reward_sum[done] = 0
-            self._length[done] = 0
+        done = dones.bool()
+        # One host read per step: every env's sum, length and done flag, filtered on the host.
+        reward_sum, length, ended = torch.stack([self._reward_sum, self._length, done.float()]).cpu()
+        ended = ended.bool()
+        if ended.any():
+            self.rewbuffer.extend(reward_sum[ended].tolist())
+            self.lenbuffer.extend(length[ended].tolist())
+            self._reward_sum.masked_fill_(done, 0)
+            self._length.masked_fill_(done, 0)
 
     def log(
         self,
