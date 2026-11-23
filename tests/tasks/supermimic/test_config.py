@@ -64,3 +64,9 @@ def test_the_recipe_is_a_command_line_flag_of_the_task():
     assert args.recipe == "blinkmimic"
     with pytest.raises(ValueError, match="recipe"):
         TASK_REGISTRY.build("supermimic", recipe="instanttrack")
+
+
+def test_the_graded_phase_replays_from_a_cuda_graph_where_there_is_one():
+    options = TASK_REGISTRY.build("supermimic").env_options.cuda_graph_options
+    # The suite builds the task on a CPU device, where the phase runs eagerly.
+    assert options is not None and not options.require_cuda
