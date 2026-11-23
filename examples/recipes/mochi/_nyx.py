@@ -250,6 +250,7 @@ def install():
         _address_urdf_vgeoms(nyx_renderer.NyxPyRenderer._build_reference_table),
     )
 
+    nyx_scene_exporter.NyxSceneExporter._export_vgeom_to_obj = _export_vgeom_to_own_folder
     nyx_scene_exporter.NyxSceneExporter._build_entity_instance = _smooth_rods(
         nyx_scene_exporter.NyxSceneExporter._build_entity_instance
     )
@@ -270,6 +271,24 @@ def _exporter_init(init):
         return init(self, scene, *args, **kwargs)
 
     return wrapper
+
+
+def _export_vgeom_to_own_folder(self, vgeom):
+    """Write a vgeom's mesh to an ``.obj`` in a folder of its own inside the export folder, and return its path.
+
+    The plugin writes every vgeom it meshes from memory (each geom of an MJCF, and of a URDF here) straight into the
+    one export folder, and trimesh names the material library it writes beside each ``.obj`` ``material.mtl`` and the
+    textures after their materials. A textured geom therefore overwrites the last one's material, and every textured
+    mesh renders with whichever texture was written last: LIBERO's kitchen came out all table wood, walls, counter and
+    fridge included. A folder per vgeom keeps each mesh's material and textures its own.
+    """
+    from gs_nyx_plugin.nyx_camera_shared_metadata import _nyx_random_string
+
+    folder = os.path.join(self._export_folder, _nyx_random_string())
+    os.makedirs(folder)
+    path = os.path.join(folder, "mesh.obj")
+    vgeom.vmesh.trimesh.export(path)
+    return path
 
 
 def _smooth_rods(build_entity_instance):
