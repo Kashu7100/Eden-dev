@@ -60,9 +60,9 @@ class KinematicLinksMotion(MotionTerm):
         Run the kinematics through ``torch.compile`` on a CUDA device. The pass is a few thousand elementwise
         operations on small tensors, so eagerly it costs their dispatch (about 10 ms per fill at any env count),
         and compiled it is a few fused kernels (under 1 ms). The first fill of every env and the first fill of a
-        subset of the envs each take a compile (tens of seconds with an empty compile cache). The fused kernels may contract a multiply and an add, so the
-        link fields differ from the eager ones in the last bits. ``False`` runs the pass eagerly, as a CPU device
-        always does.
+        subset of the envs each take a compile (tens of seconds with an empty compile cache). The fused kernels may
+        contract a multiply and an add, so the link fields differ from the eager ones in the last bits. ``False``
+        runs the pass eagerly, as a CPU device always does.
     """
 
     compile_kinematics: bool = True

@@ -45,19 +45,22 @@ eden train --task supermimic --dataset bones_seed --raw_data_path /data/bones_se
 
 The first run prepares the library into `--processed_data_path` (13.5 GB for BONES-SEED, root and joints only;
 link states are computed by forward kinematics when an env reads them); later runs load it. Training takes about
-13 GB of GPU memory on top of the library. One iteration takes about 2 s on an A100 and about 1.5 s on an L40S
-(28,000 env steps per second, of which 0.4 s is collection and 1.0 s is learning).
+13 GB of GPU memory on top of the library. One iteration takes about 1.2 s on an L40S (34,000 env steps per second,
+of which 0.22 s is collection and 0.98 s is learning).
 
 Measured on LAFAN1 with the default options, one L40S and one seed:
 
 | Iterations | Training time | Mean episode reward | Mean episode length (of 500 steps) |
 |---|---|---|---|
 | 100 | 2 min | 12.0 | 325 |
-| 500 | 12 min | 37.6 | 480 |
-| 1000 | 24 min | 39.6 | 472 |
-| 2000 | 49 min | 42.1 | 482 |
+| 500 | 10 min | 37.6 | 480 |
+| 1000 | 20 min | 39.6 | 472 |
+| 2000 | 40 min | 42.1 | 482 |
 
-The run took 53 minutes with startup. The default 20,000 iterations take about 8 hours at that rate.
+The times are that many iterations at 1.2 s, without startup; 20,000 iterations take about 6.7 hours at that rate.
+A run starts in about 1 minute when `torch.compile`'s caches are warm and in about 5 minutes when they are empty.
+The caches live under `/tmp` unless `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` name another directory, so on a
+cluster point both at a shared filesystem.
 
 ## BlinkMimic recipe
 
@@ -97,8 +100,21 @@ velocity changes and starts policy updates with the first world-model update, as
 BlinkMimic's world model also predicts a position correction on top of the integrated pose, which this one does
 not. BlinkMimic's contact reward, its evaluation-guided resets and its capture of the simulator step are not ported.
 
-> **TODO (timing):** training time and return of `--recipe blinkmimic` against the default recipe, on one GPU and
-> one seed. Not measured yet.
+Measured on LAFAN1 with 4096 envs on one L40S and one seed. One iteration of the recipe takes about 0.59 s (0.22 s
+collection, 0.36 s learning): 147 ms per update round, against 300 ms with the default options. `evaluate.py` on
+checkpoints of both (40 clips, randomization on):
+
+| Options | Iterations | Training time | Failed clips | MPJPE |
+|---|---|---|---|---|
+| default | 500 | 10 min | 8 | 44.7 mm |
+| default | 1000 | 20 min | 5 | 28.5 mm |
+| `--recipe blinkmimic` | 300 | 3 min | 8 | 34.0 mm |
+| `--recipe blinkmimic` | 500 | 5 min | 8 | 29.2 mm |
+| `--recipe blinkmimic` | 1000 | 10 min | 3 | 24.8 mm |
+
+Training time is that many iterations at the time per iteration above, without startup. The failed-clip count moves
+by a few clips from one checkpoint to the next. Time per round varies by a few percent between nodes of the same GPU
+model.
 
 ## Evaluate
 
