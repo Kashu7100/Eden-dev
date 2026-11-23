@@ -57,9 +57,16 @@ factory. A task without one is refused with the list of tasks that have one.
 | `whiteboard_write_text`, `whiteboard_write_in_colour`, `whiteboard_draw_table` | the task's own `ScriptedDrawer` | |
 | `art_calligraphy_dai`, `art_calligraphy_san`, `art_calligraphy_ei`, `art_calligraphy_lettering_minimum` | the task's own `ScriptedWriter` | |
 | `art_painting_sunset`, `art_painting_fuji_study`, `art_painting_fuji` | the task's own `ScriptedPainter` | |
+| `mochi_fold_the_shirt` | the task's own `ShirtFolder` (`eden/tasks/mochi/scripted_demos.py`) | |
 
 The whiteboard and art demonstrators move a held tool through the arm's IK alone, with no gripper action and no
 randomness; they accept only `--p_mistake 0`. See [Whiteboard](../tasks/whiteboard.md) and [Art](../tasks/art.md).
+
+The shirt fold drives both YAMs of a Mochi scene itself, because the rig tools above read Genesis's rigid colliders
+and the Mochi arms' fingers have none. It draws each episode's pace and a grasp jitter from the seed, makes no
+deliberate mistakes (`--p_mistake 0` only), and folds only the two starts with the sleeves across the bench, so a
+run names them: `eden datagen --task mochi_fold_the_shirt --override 'event_options: {fold_start: {state_indices:
+[1, 3]}}'`. Its episodes do not reach the task's success. See [Mochi](../tasks/mochi.md).
 
 ## What an episode records
 

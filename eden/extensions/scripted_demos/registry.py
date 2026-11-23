@@ -23,5 +23,6 @@ SCRIPTED_DEMO_REGISTRY = Registry(
         "eden.tasks.whiteboard.scripted_demos",
         "eden.tasks.art.calligraphy.scripted_demos",
         "eden.tasks.art.painting.scripted_demos",
+        "eden.tasks.mochi.scripted_demos",
     ),
 )

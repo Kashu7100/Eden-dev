@@ -8,8 +8,9 @@ optional_deps: [nyx]
 run: uv run python examples/recipes/mochi/fold_the_shirt_nyx.py
 ---
 
-The task, the routine and every move are ``fold_the_shirt_routine.py``'s: two YAMs fold the ``mochi_fold_the_shirt``
-T-shirt in thirds through the task's own actions. Read that one for what the arms do. What differs is the look. The
+The task, the fold and every move are ``fold_the_shirt_routine.py``'s: two YAMs fold the ``mochi_fold_the_shirt``
+T-shirt in thirds through the task's own actions, driven by the task's scripted demonstrator
+(:class:`~eden.tasks.mochi.scripted_demos.ShirtFolder`). Read those for what the arms do. What differs is the look. The
 workcell stands on the table of LIBERO's kitchen (its floor, walls, counter, stove and fridge), and the recording
 camera is a Nyx path-tracer sensor lit by a ceiling lamp and a window light.
 
@@ -107,46 +108,35 @@ def main():
     parser.add_argument("-o", "--output-dir", type=str, default="renders/mochi", help="Directory the video goes to")
     parser.add_argument("--spp", type=int, default=64, help="Nyx samples per pixel (noise vs. render time)")
     parser.add_argument("--res", type=int, nargs=2, default=(1280, 720), help="Render resolution, width height")
+    parser.add_argument("--seed", type=int, default=0, help="Seed of the fold's pace and grasp jitter")
     args = parser.parse_args()
     # No --cpu: Nyx renders on CUDA, so a CPU run has no outcome but a crash inside the first render.
     en.init(backend=gs.gpu)
 
     import _nyx
-    from fold_the_shirt_routine import START, RecordingArms, fold, report
+    from fold_the_shirt_routine import build, play
 
-    from eden.envs.base import RLEnvBase
     from eden.options import CamerasOptions
     from eden.tasks import TASK_REGISTRY
 
     _nyx.install()  # teach the plugin about the Mochi solver, before the scene is built
 
     config = TASK_REGISTRY.build("mochi_fold_the_shirt")
-    config.env_options.num_envs = 1
-    config.event_options.fold_start.state_indices = [START]
-    for name in config.termination_options.term_keys():
-        config.termination_options.disable_term(name)
     # The kitchen's table top is the bench in the picture; the bench plane still carries the arms and the shirt.
     config.scene_options.plane.visualization = False
     config.scene_options.kitchen = kitchen()
     config.scene_options.shirt.surface = SHIRT
     config.cameras_options = CamerasOptions(rec=nyx_camera(tuple(args.res), args.spp))
 
-    env = RLEnvBase.from_config(config)
-    env.build()
-    env.reset()
+    env = build(config)
     camera = env.cameras["rec"]
     os.makedirs(args.output_dir, exist_ok=True)
-    path = os.path.join(args.output_dir, "mochi_fold_the_shirt_nyx.mp4")
+    # A smoke run records a few frames: under a name of its own, so it never replaces a full render.
+    smoke = en.is_smoke()
+    path = os.path.join(args.output_dir, f"mochi_fold_the_shirt_nyx{'_smoke' if smoke else ''}.mp4")
     camera.start_recording(path, fps=1.0 / env.dt)
-    arms = RecordingArms(env, camera)
     try:
-        if en.is_smoke():
-            arms.wait(5 * arms.dt)
-            return
-        report(env, "start")
-        arms.wait(1.0)  # a still beat before the arms move
-        fold(env, arms)
-        arms.wait(1.5)
+        play(env, camera, seed=args.seed, still_s=0.0 if smoke else 1.0)  # a still beat before the arms move
     finally:
         camera.stop_recording()
         print(f"Saved video to {path}")

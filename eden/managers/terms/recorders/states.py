@@ -9,7 +9,12 @@ from eden.managers import RECORDER_TERM_REGISTRY, RecorderTerm
 
 @RECORDER_TERM_REGISTRY.register()
 class InitialStateRecorder(RecorderTerm):
-    """Record per-episode initial entity states right after reset."""
+    """Record per-episode initial entity states right after reset.
+
+    A deformable body (an entity with vertices: FEM, Mochi soft) has no joints or root pose; its state is its
+    vertices, recorded as ``vertex_pos`` and ``vertex_vel`` ``(n_vertices, 3)`` per env in place of ``qpos``,
+    ``dofs_vel``, ``pos`` and ``quat``.
+    """
 
     include_qpos: bool = True
     include_dofs_vel: bool = True
@@ -23,6 +28,12 @@ class InitialStateRecorder(RecorderTerm):
         for entity_name, entity in self._env.entities.items():
             entity_state: dict[str, torch.Tensor] = {}
 
+            if hasattr(entity, "get_vertex_positions"):
+                entities_state[entity_name] = {
+                    "vertex_pos": entity.get_vertex_positions(envs_idx=envs_idx).clone(),
+                    "vertex_vel": entity.get_vertex_velocities(envs_idx=envs_idx).clone(),
+                }
+                continue
             if self.include_qpos:
                 entity_state["qpos"] = entity.get_qpos(qs_idx_local=entity.qs_idx_local, envs_idx=envs_idx).clone()
             if self.include_dofs_vel:

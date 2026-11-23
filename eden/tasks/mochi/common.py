@@ -24,6 +24,7 @@ from genesis.utils.geom import transform_by_quat
 import eden as en
 from eden.options.entities import PlaneOptions
 from eden.options.materials import MochiRigidMaterialOptions
+from eden.options.robots.i2rt_yam import Yam
 from eden.utils.assets import get_asset_path
 from eden.utils.procedural_meshes import derived_file_path, write_atomically
 
@@ -45,9 +46,9 @@ YAM_FINGERS_CLOSED = {"left_finger": 0.0, "right_finger": 0.0}
 # RateLimitedGripper). i2RT publishes the jaws' 95 mm stroke but no speed; driven straight to the end of their
 # travel instead, the servos closed at 0.1-1.9 m/s a finger, set by each task's squeeze stiffness.
 YAM_FINGER_SPEED = 0.06
-# The point between the fingertip pads, in link_6's frame (measured on the built arm: the pads' contact
-# patches on a gripped sponge centre here). The jaws close along link_6's x.
-YAM_TCP_OFFSET = (0.0, -0.044, 0.1305)
+# The point between the fingertip pads, in link_6's frame (``Yam.tcp_offset``, measured on the built arm). The jaws
+# close along link_6's x.
+YAM_TCP_OFFSET = Yam.tcp_offset
 # link_6 pointing straight down with the jaws closing along world x (wxyz).
 YAM_HAND_DOWN = (0.0, 1.0, 0.0, 0.0)
 

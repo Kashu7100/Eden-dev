@@ -103,6 +103,19 @@ The threshold was checked on Mochi rather than refitted. Eight frames of ClothDo
 like the task's starts and laid into its scene, were settled for 4 s. Seven settled at Q +0.19 to +1.14, all above
 the threshold (change -0.09 to +0.54, mean +0.21), so it is kept; one frame's solve diverged. `examples/recipes/mochi/fold_the_shirt_threshold.py` reruns the measurement.
 
+The task's scripted demonstrator, `ShirtFolder` (`eden/tasks/mochi/scripted_demos.py`), folds the sleeves in and
+then the length in thirds with both YAMs, through the task's own actions. `eden datagen` records it from the two
+starts with the sleeves across the bench; the far sleeve of the other two is out of reach:
+
+```bash
+eden datagen --task mochi_fold_the_shirt --num_envs 16 \
+    --override 'event_options: {fold_start: {state_indices: [1, 3]}}'
+```
+
+It does not reach the task's success: its final fold quality runs about -0.9 to -2.3, held back by a lumpy top
+(the planar-top feature) and by sleeve folds that sometimes slip. `examples/recipes/mochi/fold_the_shirt_routine.py`
+plays it in one env, and `fold_the_shirt_nyx.py` path traces it in LIBERO's kitchen.
+
 The garment's files are converted from ClothDojo's Hub dataset by `examples/recipes/mochi/convert_clothdojo_shirt.py`
 into `objects/clothdojo/rand_ZZCWITH5HY/` of Eden's asset dataset: the mesh (`shirt.obj`, in the USD's vertex order)
 and the four starts with the flat reference (`fold_starts.npz`, in ClothDojo's world frame).
