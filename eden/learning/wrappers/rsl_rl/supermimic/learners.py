@@ -425,9 +425,11 @@ class PolicyLearner:
         perm = torch.rand(len(returns) // 4 * 4, device=returns.device).argsort()
         self.critic.requires_grad_(True)
         losses = []
+        # Every epoch reads the same four minibatches, so each is gathered once.
+        batches = [(obs[idx], returns[idx]) for idx in perm.view(4, -1)]
         for _ in range(5):
-            for idx in perm.view(4, -1):
-                loss = (returns[idx] - self.critic(obs[idx])).pow(2).mean()
+            for batch_obs, batch_returns in batches:
+                loss = (batch_returns - self.critic(batch_obs)).pow(2).mean()
                 optimize(self.critic_optimizers, loss, self.critic.parameters(), max_norm=1.0)
                 losses.append(loss.detach())
         return torch.stack(losses).mean()
