@@ -114,7 +114,8 @@ def test_the_control_force_is_the_one_the_last_step_applied(pendulum_urdf_path, 
     scene.build()
     pendulum.set_dofs_kp([kp])
     pendulum.set_dofs_kv([kv])
-    assert_allclose(pendulum.get_dofs_control_force(), 0.0, atol=0.0)  # no step has applied any force yet
+    # No step has computed one since the gains were written, which genesis-world 1.5 reports as unknown
+    assert pendulum.get_dofs_control_force() is None
 
     pendulum.control_dofs_position([0.3])
     scene.step()

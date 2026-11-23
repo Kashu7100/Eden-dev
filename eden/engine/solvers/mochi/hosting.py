@@ -138,6 +138,15 @@ def create_mochi_scene(mochi_options: MochiOptions | None = None, **scene_kwargs
     return scene
 
 
+def _refuse_debug_vis_mode(vis_mode: str, material) -> None:
+    """Raise for a `vis_mode` other than "visual": the MochiSolver draws no debug representation of its bodies."""
+    if vis_mode != "visual":
+        gs.raise_exception(
+            f"`vis_mode='{vis_mode}'` on a {type(material).__name__} body: the MochiSolver draws its bodies as they "
+            "look only, so this body would be drawn by nothing. Leave `vis_mode` unset."
+        )
+
+
 def add_mochi_entity(
     scene: Scene,
     morph: "Morph | None" = None,
@@ -164,6 +173,8 @@ def add_mochi_entity(
         if not isinstance(material, mochi_materials.Base):
             gs.raise_exception(f"`add_mochi_entity` takes a Mochi material, got {type(material).__name__}.")
         if vis_mode is not None:
+            # Ahead of the spec, which refuses a debug mode on a deformable material with a message about debug views
+            _refuse_debug_vis_mode(vis_mode, material)
             surface = (gs.surfaces.Default() if surface is None else surface).model_copy(update={"vis_mode": vis_mode})
         spec = mochi_specs.mochi_spec(morph, material, surface, visualize_contact, name)
     elif any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
@@ -187,11 +198,7 @@ def add_mochi_entity(
     # they look alone, having no debug representation of them (see `MochiScopedRenderContext`), so "visual" is the
     # only value that keeps a body drawn.
     if surface.vis_mode is not None:
-        if surface.vis_mode != "visual":
-            gs.raise_exception(
-                f"`vis_mode='{surface.vis_mode}'` on a {type(spec.material).__name__} body: the MochiSolver draws its "
-                "bodies as they look only, so this body would be drawn by nothing. Leave `vis_mode` unset."
-            )
+        _refuse_debug_vis_mode(surface.vis_mode, spec.material)
         warn_once(
             scene,
             "'vis_mode=\"visual\"' is deprecated. Leave it unset, since the material decides how an entity is drawn.",

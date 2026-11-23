@@ -187,8 +187,8 @@ def test_the_rasterizer_draws_the_rigid_and_the_deformable_bodies():
 
 
 def test_a_frame_drawn_after_a_setter_shows_the_body_where_the_setter_put_it():
-    """A setter between two steps syncs the rasterizer with the nodes of the solver it changed alone, as the
-    interactive viewer does on every change of a body's geometry; the camera's next frame draws from those nodes.
+    """A setter between two steps makes the solver's shapes stale in the render context, which a forced frame
+    refreshes as it reads them.
     """
     scene = _scene()
     scene.add_entity(gs.morphs.Plane(), material=mochi_materials.Rigid())
@@ -202,12 +202,12 @@ def test_a_frame_drawn_after_a_setter_shows_the_body_where_the_setter_put_it():
     scene.step()
 
     def n_red() -> int:
-        rgb = np.asarray(camera.render()[0])
+        # Forced: the rasterizer syncs the scene once per step, and the frame after the setter is the step's second
+        rgb = np.asarray(camera.render(force_render=True)[0])
         return int(((rgb[..., 0] > 150) & (rgb[..., 1] < 80) & (rgb[..., 2] < 80)).sum())
 
     assert n_red() > 50
     ball.set_pos(torch.tensor([50.0, 0.0, 0.3], dtype=gs.tc_float, device=gs.device))
-    scene.visualizer.sync(frozenset((scene.mochi_solver,)))
     assert n_red() == 0
 
 

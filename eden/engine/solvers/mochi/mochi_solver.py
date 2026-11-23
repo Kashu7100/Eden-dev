@@ -2923,9 +2923,11 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         self._wake_nodes(dofs_idx, self._dofs_node, envs_idx_)
 
     def get_dofs_control_force(self, dofs_idx=None, envs_idx=None):
-        """The control force the last step applied, as the rigid solver reports it (see `substep_post_coupling`)."""
+        """The control force the last step applied, as the rigid solver reports it (see `substep_post_coupling`), None
+        after a change of the state or of the model until the next step computes it.
+        """
         tensor = self._read_data(self.dyn_state.dofs.qf_applied, envs_idx, dofs_idx, copy=True)
-        return tensor[0] if self.n_envs == 0 else tensor
+        return tensor if tensor is None or self.n_envs > 0 else tensor[0]
 
     @mutates
     def set_links_contact_params(self, links_idx, **params):
@@ -2938,7 +2940,8 @@ class MochiSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if value is None:
                 continue
             field = self.mochi_info.geoms.__getattribute__(name)
-            values = qd_to_numpy(field)
+            # A copy: genesis-world 1.5 hands out its zero-copy numpy views read-only; the array is written back whole
+            values = qd_to_numpy(field, copy=True)
             values[geoms_idx] = value
             field.from_numpy(values)
         self._wake_nodes(self._nodes_idx, self._nodes_idx, self._envs_idx)
