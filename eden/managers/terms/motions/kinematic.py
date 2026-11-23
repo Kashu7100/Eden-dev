@@ -40,6 +40,10 @@ def link_fields(
     return (*links_w, *links_b)
 
 
+#: The root and joint fields the kinematics read, in the order :func:`link_fields` takes them.
+_STATE_FIELDS = ("base_pos_w", "base_quat_w", "base_lin_vel_w", "base_ang_vel_w", "dofs_pos", "dofs_vel")
+
+
 @MOTION_TERM_REGISTRY.register()
 class KinematicLinksMotion(MotionTerm):
     """Reference links by forward kinematics.
@@ -55,8 +59,8 @@ class KinematicLinksMotion(MotionTerm):
     compile_kinematics : bool
         Run the kinematics through ``torch.compile`` on a CUDA device. The pass is a few thousand elementwise
         operations on small tensors, so eagerly it costs their dispatch (about 10 ms per fill at any env count),
-        and compiled it is a few fused kernels (under 1 ms). The first fill, and the first fill of a subset of the
-        envs, each take the compile (tens of seconds). The fused kernels may contract a multiply and an add, so the
+        and compiled it is a few fused kernels (under 1 ms). The first fill of every env and the first fill of a
+        subset of the envs each take a compile (tens of seconds with an empty compile cache). The fused kernels may contract a multiply and an add, so the
         link fields differ from the eager ones in the last bits. ``False`` runs the pass eagerly, as a CPU device
         always does.
     """
@@ -85,8 +89,8 @@ class KinematicLinksMotion(MotionTerm):
         self.fk = ForwardKinematics(
             entity_options.fetch_asset(), self.target_dofs_name[key], self.target_links_name[key]
         ).to(self.device)
-        compiled = self.compile_kinematics and torch.device(self.device).type == "cuda"
-        self._link_fields = torch.compile(link_fields) if compiled else link_fields
+        self._compiled = self.compile_kinematics and torch.device(self.device).type == "cuda"
+        self._link_fields = torch.compile(link_fields) if self._compiled else link_fields
 
     def derives_links(self, motion_sequence_key: str) -> bool:
         return True
@@ -98,12 +102,17 @@ class KinematicLinksMotion(MotionTerm):
         data_buffer: MotionReferenceData,
     ) -> None:
         """The link fields of ``data_buffer[envs_idx]`` by forward kinematics of its root and joint fields."""
-        base_pos, base_quat, base_lin, base_ang, dofs_pos, dofs_vel = (
-            getattr(data_buffer, field)[envs_idx].flatten(0, 1)
-            for field in ("base_pos_w", "base_quat_w", "base_lin_vel_w", "base_ang_vel_w", "dofs_pos", "dofs_vel")
-        )
-        links = self._link_fields(self.fk, base_pos, base_quat, base_lin, base_ang, dofs_pos, dofs_vel)
-        for field, value in zip(LINK_FIELDS, links, strict=True):
-            dst = getattr(data_buffer, field, None)
-            if dst is not None:
-                dst[envs_idx] = value.reshape(-1, *dst.shape[1:])
+        # torch.compile keeps one compiled pass per grad and inference mode and per input layout, and each costs
+        # tens of seconds. Two are needed: every env through a slice (fixed row count), and a subset through its
+        # ids, whose row count changes from one reset to the next and is declared so from its first fill. Always
+        # in inference mode, whatever the caller's: a training loop steps in it, the env's first reset does not.
+        with torch.inference_mode():
+            state = [getattr(data_buffer, field)[envs_idx].flatten(0, 1) for field in _STATE_FIELDS]
+            if self._compiled and not isinstance(envs_idx, slice):
+                for rows in state:
+                    torch._dynamo.maybe_mark_dynamic(rows, 0)
+            links = self._link_fields(self.fk, *state)
+            for field, value in zip(LINK_FIELDS, links, strict=True):
+                dst = getattr(data_buffer, field, None)
+                if dst is not None:
+                    dst[envs_idx] = value.reshape(-1, *dst.shape[1:])
