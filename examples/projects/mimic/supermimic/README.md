@@ -105,15 +105,14 @@ not. BlinkMimic's contact reward, its evaluation-guided resets and its capture o
 Play every clip once from its first frame, without reset noise, and count the falls:
 
 ```bash
-python examples/projects/mimic/supermimic/evaluate.py --checkpoint logs/supermimic/<run>/model_20000.pt \
-    --processed-data-path /data/lafan1_g1.pt
+python examples/projects/mimic/supermimic/evaluate.py --checkpoint logs/supermimic/<run>/model_20000.pt
 ```
 
 Replay (`eden inference` and this script) drives every environment through the motion encoder, whatever `slot_mix`
-the checkpoint trained on, and reads the proprioception without the training sensor noise. `eden inference` rebuilds
-the learner from the run's `config.json`. This script builds the task anew, so a checkpoint trained with
-`--recipe blinkmimic` needs `--recipe blinkmimic` here too; without it the load stops and names the options that
-differ.
+the checkpoint trained on, and reads the proprioception without the training sensor noise. Both rebuild the learner
+from the run's `config.json`, so a checkpoint trained with `--recipe blinkmimic` or with `--override` replays as it
+trained. The script's library flags (`--dataset`, `--raw-data-path`, `--processed-data-path`, `--clip-list`) replace
+the run's library as a set; pass none to play the clips the run trained on.
 
 ## Options
 

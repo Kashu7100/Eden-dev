@@ -13,13 +13,15 @@ Each clip gets one env, which starts on the clip's first frame without reset noi
 (a success) or the robot falls (a termination). The script reports the failures and two tracking errors averaged
 over each clip's steps: the mean per-body position error of the tracked bodies relative to the root (MPJPE, mm) and
 the mean joint angle error (rad). Randomization of friction, centre of mass and encoder bias stays as in training.
-A checkpoint trained with ``--recipe blinkmimic`` needs the same flag here, which builds its networks and plays the
-average of the actor.
+The task and learner options are the run's own, read from the ``config.json`` beside the checkpoint, so a run trained
+with ``--recipe blinkmimic`` or with ``--override`` evaluates as it trained. The library flags (``--dataset``,
+``--raw-data-path``, ``--processed-data-path``, ``--clip-list``) replace the run's library as a set: pass none to play
+the clips the run trained on. A checkpoint with no ``config.json`` beside it builds the task anew and takes
+``--recipe``.
 
 Usage::
 
     python examples/projects/mimic/supermimic/evaluate.py --checkpoint logs/supermimic/<run>/model_20000.pt
-    python examples/projects/mimic/supermimic/evaluate.py --checkpoint model.pt --recipe blinkmimic
     python examples/projects/mimic/supermimic/evaluate.py --checkpoint model.pt --dataset bones_seed \\
         --raw-data-path /data/bones_seed/g1/csv --processed-data-path /data/bones_seed_g1.pt \\
         --clip-list bones_seed_2000_clips.json -b 2000 -o bones_seed_benchmark.json
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 import eden as en  # must be imported before genesis to isolate GPUs for DDP
 import genesis as gs
@@ -38,15 +41,15 @@ import torch
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n---")[0].strip())
     parser.add_argument("--checkpoint", type=str, required=True, help="A SuperMimic checkpoint (model_<it>.pt).")
-    parser.add_argument("--dataset", type=str, default="lafan1", help="Motion library: lafan1 or bones_seed.")
+    parser.add_argument("--dataset", type=str, default=None, help="Motion library: lafan1 or bones_seed.")
     parser.add_argument("--raw-data-path", type=str, default=None, help="The library's CSV clips.")
     parser.add_argument("--processed-data-path", type=str, default=None, help="Cache of the prepared library.")
     parser.add_argument("--clip-list", type=str, default=None, help="Clips to play (.json/.yaml list).")
     parser.add_argument(
         "--recipe",
         type=str,
-        default="supermimic",
-        help="The recipe the checkpoint trained with: supermimic or blinkmimic.",
+        default=None,
+        help="Recipe of a checkpoint with no config.json beside it: supermimic or blinkmimic.",
     )
     parser.add_argument("-b", "--num-envs", type=int, default=64, help="Envs, at least one per clip.")
     parser.add_argument("-o", "--output", type=str, default=None, help="Per-clip results (.json).")
@@ -56,16 +59,32 @@ def main() -> None:
     en.init(backend=gs.cpu if args.cpu else gs.gpu, performance_mode=True)
     from eden.envs.wrappers.rsl_rl_env import RslRlVecEnvWrapper, make_rsl_rl_runner
     from eden.tasks import TASK_REGISTRY
-    from eden.tasks.supermimic.config import TRACKED_LINKS
+    from eden.tasks.supermimic.config import TRACKED_LINKS, SuperMimicConfig, SuperMimicDataMod
+    from eden.utils.configs import EdenConfig
 
-    cfg = TASK_REGISTRY.build(
-        "supermimic",
-        dataset=args.dataset,
-        raw_data_path=args.raw_data_path,
-        processed_data_path=args.processed_data_path,
-        clip_list=args.clip_list,
-        recipe=args.recipe,
-    )
+    library = {
+        "dataset": args.dataset,
+        "raw_data_path": args.raw_data_path,
+        "processed_data_path": args.processed_data_path,
+        "clip_list": args.clip_list,
+    }
+    library = {flag: value for flag, value in library.items() if value is not None}
+    saved = os.path.join(os.path.dirname(os.path.abspath(args.checkpoint)), "config.json")
+    if os.path.exists(saved):
+        if args.recipe is not None:
+            raise SystemExit(
+                f"--recipe {args.recipe} cannot apply: {saved} holds the learner options this checkpoint trained "
+                "with. Drop --recipe."
+            )
+        cfg = EdenConfig.load_from_file(saved)
+        if not isinstance(cfg, SuperMimicConfig):
+            raise SystemExit(f"{saved} is a {type(cfg).__name__}, not the supermimic task's config.")
+        cfg.env_options.reset_training_only_fields()
+        if library:
+            cfg = SuperMimicDataMod(**library).apply(cfg)
+    else:
+        recipe = {} if args.recipe is None else {"recipe": args.recipe}
+        cfg = TASK_REGISTRY.build("supermimic", **library, **recipe)
     rsi = cfg.event_options.reset_from_motion
     rsi.pose_range, rsi.velocity_range, rsi.dofs_position_range = {}, {}, (0.0, 0.0)
     cfg.motion_options.default.reset_sampling = "clip_start"

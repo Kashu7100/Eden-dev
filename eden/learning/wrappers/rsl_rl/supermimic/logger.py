@@ -88,12 +88,18 @@ class RunLogger:
             return
         self.tot_timesteps += steps
         self.tot_time += collect_time + learn_time
-        scalars = {f"Loss/{k}": float(v) for k, v in losses.items()}
+        # One host read for every loss and episode statistic: each is a 0-dim tensor on the device.
+        on_device = {f"Loss/{k}": torch.as_tensor(v, dtype=torch.float) for k, v in losses.items()}
         for key in dict.fromkeys(k for log in self._episode_logs for k in log):
             values = [
                 torch.as_tensor(log[key], dtype=torch.float).reshape(-1) for log in self._episode_logs if key in log
             ]
-            scalars[key if "/" in key else f"Episode/{key}"] = float(torch.cat(values).mean())
+            on_device[key if "/" in key else f"Episode/{key}"] = torch.cat(values).mean()
+        device = self._reward_sum.device
+        read = (
+            torch.stack([v.detach().reshape(()).to(device) for v in on_device.values()]).tolist() if on_device else []
+        )
+        scalars = dict(zip(on_device, read, strict=True))
         self._episode_logs.clear()
         if self.rewbuffer:
             scalars["Train/mean_reward"] = statistics.mean(self.rewbuffer)
