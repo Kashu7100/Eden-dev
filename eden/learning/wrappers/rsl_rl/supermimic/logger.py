@@ -68,7 +68,19 @@ class RunLogger:
             self._reward_sum[done] = 0
             self._length[done] = 0
 
-    def log(self, it: int, total_it: int, steps: int, collect_time: float, learn_time: float, losses: dict) -> None:
+    def log(
+        self,
+        it: int,
+        total_it: int,
+        steps: int,
+        collect_time: float,
+        learn_time: float,
+        losses: dict,
+        normalized_return: float | None = None,
+    ) -> None:
+        """Write one iteration. ``normalized_return`` is the mean, over the episodes that ended in it, of the
+        episode's summed reward over its length times the largest step reward; ``None`` if no episode ended.
+        """
         if self.disable_logs:
             return
         self.tot_timesteps += steps
@@ -83,6 +95,8 @@ class RunLogger:
         if self.rewbuffer:
             scalars["Train/mean_reward"] = statistics.mean(self.rewbuffer)
             scalars["Train/mean_episode_length"] = statistics.mean(self.lenbuffer)
+        if normalized_return is not None:
+            scalars["Train/mean_normalized_return"] = normalized_return
         fps = int(steps / max(collect_time + learn_time, 1e-9))
         scalars |= {"Perf/total_fps": fps, "Perf/collection_time": collect_time, "Perf/learning_time": learn_time}
         if self._wandb is not None:

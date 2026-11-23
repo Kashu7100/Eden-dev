@@ -14,6 +14,7 @@ from eden.envs.wrappers.rsl_rl_env import EDEN_RUNNER_MIXINS
 from eden.learning.wrappers.rsl_rl.supermimic.goals import motion_goal_spec, velocity_goal_spec
 from eden.learning.wrappers.rsl_rl.supermimic.learners import PolicyLearner, WorldModelLearner, load_optimizer_state
 from eden.learning.wrappers.rsl_rl.supermimic.logger import RunLogger
+from eden.learning.wrappers.rsl_rl.supermimic.mirror import Mirror
 from eden.learning.wrappers.rsl_rl.supermimic.models import Dynamics, MultiEncoderActor, build_mlp
 from eden.learning.wrappers.rsl_rl.supermimic.options import SuperMimicRunnerOptions
 from eden.learning.wrappers.rsl_rl.supermimic.replay_buffer import FieldSpec, ReplayBuffer
@@ -27,10 +28,19 @@ from eden.learning.wrappers.rsl_rl.supermimic.task_contract import (
     task_reward_spec,
     termination_threshold,
 )
-from eden.learning.wrappers.rsl_rl.supermimic.world_model_env import WorldModelEnv, actor_input, sample_starts
+from eden.learning.wrappers.rsl_rl.supermimic.world_model_env import (
+    WorldModelEnv,
+    actor_input,
+    reference_action,
+    sample_starts,
+)
 
 if TYPE_CHECKING:
     from eden.envs.wrappers.rsl_rl_env import RslRlVecEnvWrapper
+
+#: Entries of the layout record (:meth:`_SuperMimicRunner._layout`) that checkpoints written before the entry
+#: existed lack, with the value those checkpoints were trained with.
+_LAYOUT_DEFAULTS = {"runner_options.policy.reference_action": False}
 
 
 class _UpdateRatio:
@@ -124,6 +134,12 @@ class _SuperMimicRunner:
         self._pending: list[tuple[torch.Tensor, torch.Tensor, TensorDict]] = []
         #: Reset bins of a loaded checkpoint whose return sampler does not fit this run's library (:meth:`load`).
         self._stale_sampler_bins: int | None = None
+        #: The iteration from which ``policy.lr_multiplier`` ramps to 1; ``None`` until the ramp starts.
+        self._lr_decay_start: int | None = None
+        self._episode_reward = torch.zeros(self.num_envs, device=self.device)
+        self._episode_steps = torch.zeros(self.num_envs, device=self.device)
+        #: ``[summed normalized return, count]`` of the episodes that ended since the last iteration's log.
+        self._ended_episodes = torch.zeros(2, device=self.device)
         self.logger = RunLogger(log_dir, options, self.num_envs, self.device)
 
     def _build_world_model(self, base, controller, robot) -> None:
@@ -152,8 +168,20 @@ class _SuperMimicRunner:
             self.representation.default_joint_pos,
             options.world_model.hidden_dims,
         ).to(self.device)
+        unscaled = [name for name, scale in zip(controller.dofs_name, self.dynamics.action_scale.tolist()) if not scale]
+        if unscaled and (options.policy.reference_action or options.world_model.mirror_share > 0.0):
+            raise ValueError(
+                f"runner_options.policy.reference_action and world_model.mirror_share turn a joint position into the "
+                f"action that commands it, which divides by the action scale, but action term "
+                f"{options.action_term!r} scales joints {unscaled} by 0. Give them a scale, or leave both options "
+                "off."
+            )
+        mirror = None
+        if options.world_model.mirror_share > 0.0:
+            mirror = Mirror(list(controller.dofs_name), self.dynamics, self.sim_context)
+            mirror.check_kinematics(self.motion.fk, self.representation.soft_joint_pos_limits)
         self.world_model_learner = WorldModelLearner(
-            self.dynamics, self.representation, options.world_model, str(self.device)
+            self.dynamics, self.representation, options.world_model, str(self.device), mirror
         )
 
     def _build_policy(self, base) -> None:
@@ -174,6 +202,7 @@ class _SuperMimicRunner:
             hidden_dims=policy.actor_hidden_dims,
             latent_bc_weight=policy.latent_bc_weight,
             history_length=policy.history_length,
+            reference_action=policy.reference_action,
         ).to(self.device)
         self.active_specs = [spec for spec in specs if policy.slot_mix.get(spec.name, 0.0) > 0.0]
         self.critic = None
@@ -197,11 +226,14 @@ class _SuperMimicRunner:
             ),
             termination_softness=policy.termination_softness,
             encoder_bias=self.sim_context.encoder_bias,
+            reference_action=policy.reference_action,
             compile=self.device.type == "cuda",
         )
         self.policy_learner = PolicyLearner(
             self.actor, self.critic, self.wm_env, policy, self.max_step_reward, str(self.device)
         )
+        #: The Polyak average of the actor that replay runs, or ``None`` without ``policy.ema_decay``.
+        self.actor_ema = self.policy_learner.actor_ema
 
     def _build_return_sampler(self) -> ReturnSampler | None:
         options = self.options
@@ -220,6 +252,8 @@ class _SuperMimicRunner:
             self.num_envs,
             self.max_step_reward,
             self.device,
+            library=self.motion.library,
+            bin_frames=self.motion.bin_frames,
         )
 
     def _make_replay_buffer(self) -> ReplayBuffer:
@@ -268,7 +302,10 @@ class _SuperMimicRunner:
             history = self._sensed(sensor, training).unsqueeze(1)
         else:
             history = self._history
-        return actor_input(goals, history)
+        reference = None
+        if self.options.policy.reference_action:
+            reference = reference_action(self.motion.library, frames, self.dynamics)
+        return actor_input(goals, history, reference_action=reference)
 
     def _seed_history(self, obs: TensorDict, training: bool = True) -> None:
         if self._stores_sensor:
@@ -309,6 +346,7 @@ class _SuperMimicRunner:
             self._pending.append((state.clone(), actions.clone(), actor_in.clone()))
             self._advance_history(next_obs[self.options.actor_observation_group].to(self.device), dones)
             self.logger.process_env_step(rewards, dones, extras)
+            self._record_returns(rewards, dones.bool())
             if self.sampler is not None:
                 clip_end = base.termination_manager.get_term_dones(self.options.clip_end_termination)
                 weights = self.sampler.record(
@@ -318,6 +356,58 @@ class _SuperMimicRunner:
                     self.motion.set_reset_distribution(weights)
         self._flush_normalization()
         return next_obs
+
+    def _record_returns(self, rewards: torch.Tensor, ended: torch.Tensor) -> None:
+        """Add one env step to each env's episode and, for an episode that ended, its normalized return (summed
+        reward over length times the largest step reward) to the iteration's tally.
+        """
+        self._episode_reward += rewards
+        self._episode_steps += 1
+        normalized = self._episode_reward / (self._episode_steps * self.max_step_reward)
+        self._ended_episodes += torch.stack([torch.where(ended, normalized, 0.0).sum(), ended.float().sum()])
+        self._episode_reward.masked_fill_(ended, 0.0)
+        self._episode_steps.masked_fill_(ended, 0.0)
+
+    def _take_normalized_return(self) -> float | None:
+        """The mean normalized return of the episodes that ended since the last call; ``None`` if none did."""
+        total, count = self._ended_episodes.tolist()
+        self._ended_episodes.zero_()
+        return total / count if count else None
+
+    def _lr_multiplier(self, iteration: int) -> float:
+        """The actor's learning-rate multiplier during ``iteration``: ``policy.lr_multiplier`` until the ramp
+        starts, then linearly down to 1 over ``policy.lr_decay_iterations`` iterations.
+        """
+        policy = self.options.policy
+        if self._lr_decay_start is None:
+            return policy.lr_multiplier
+        progress = min(1.0, (iteration - self._lr_decay_start) / policy.lr_decay_iterations)
+        return policy.lr_multiplier + (1.0 - policy.lr_multiplier) * progress
+
+    def _start_lr_decay_if_due(self, next_iteration: int, normalized_return: float | None) -> None:
+        """Start the ramp at ``next_iteration`` once the return reaches ``policy.lr_decay_return`` or the deadline
+        ``policy.lr_decay_deadline`` has come.
+        """
+        policy = self.options.policy
+        if self._lr_decay_start is not None:
+            return
+        reached = (
+            policy.lr_decay_return is not None
+            and normalized_return is not None
+            and normalized_return >= policy.lr_decay_return
+        )
+        due = policy.lr_decay_deadline is not None and next_iteration >= policy.lr_decay_deadline
+        if reached or due:
+            self._lr_decay_start = next_iteration
+            why = (
+                f"the normalized return {normalized_return:.3f} reached {policy.lr_decay_return}"
+                if reached
+                else f"the deadline policy.lr_decay_deadline={policy.lr_decay_deadline} came"
+            )
+            en.logger.info(
+                f"Iteration {next_iteration}: {why}; the actor's learning-rate multiplier ramps from "
+                f"{policy.lr_multiplier} to 1 over {policy.lr_decay_iterations} iterations."
+            )
 
     def _raise_if_not_finite(self) -> None:
         """Raise if this iteration collected a non-finite value (``runner_options.check_for_nan``).
@@ -375,6 +465,9 @@ class _SuperMimicRunner:
         try:
             obs, _ = self.env.reset()
             self._seed_history(obs)
+            self._episode_reward.zero_()
+            self._episode_steps.zero_()
+            self._ended_episodes.zero_()
             updates_due = _UpdateRatio(
                 self.num_envs
                 / (world_model.num_batches * world_model.batch_size * world_model.horizon)
@@ -386,6 +479,9 @@ class _SuperMimicRunner:
             for it in range(start, total):
                 t0, learn_time = time.time(), 0.0
                 losses: dict[str, torch.Tensor] = {}
+                if self.policy_learner.lr_scale is not None:
+                    self.policy_learner.lr_scale.fill_(self._lr_multiplier(it))
+                    losses["policy/lr_multiplier"] = self.policy_learner.lr_scale.clone()
                 for _ in range(options.num_steps_per_env):
                     obs = self._collect(obs)
                     for _ in range(updates_due(step)):
@@ -411,7 +507,11 @@ class _SuperMimicRunner:
                 if self.sampler is not None:
                     losses["reset_sampler/top1_prob"] = self.motion.reset_distribution.max()
                 env_steps = options.num_steps_per_env * self.num_envs
-                self.logger.log(it, total, env_steps, time.time() - t0 - learn_time, learn_time, losses)
+                normalized_return = self._take_normalized_return()
+                self._start_lr_decay_if_due(it + 1, normalized_return)
+                self.logger.log(
+                    it, total, env_steps, time.time() - t0 - learn_time, learn_time, losses, normalized_return
+                )
                 if self.log_dir is not None and (it + 1) % options.save_interval == 0:
                     self.save(os.path.join(self.log_dir, f"model_{it + 1}.pt"))
             if self.log_dir is not None:
@@ -431,6 +531,7 @@ class _SuperMimicRunner:
             "runner_options.policy.latent_dim": policy.latent_dim,
             "runner_options.policy.actor_hidden_dims": tuple(policy.actor_hidden_dims),
             "runner_options.policy.critic_hidden_dims": tuple(policy.critic_hidden_dims),
+            "runner_options.policy.reference_action": policy.reference_action,
             "runner_options.world_model.hidden_dims": tuple(self.options.world_model.hidden_dims),
             "joints": representation.num_joints,
             "actions": self.env.num_actions,
@@ -443,12 +544,14 @@ class _SuperMimicRunner:
             return
         checkpoint = {
             "actor": self.actor.state_dict(),
+            "actor_ema": None if self.actor_ema is None else self.actor_ema.state_dict(),
             "dynamics": self.dynamics.state_dict(),
             "critic": None if self.critic is None else self.critic.state_dict(),
             "world_model_optimizers": [o.state_dict() for o in self.world_model_learner.optimizers],
             "actor_optimizers": [o.state_dict() for o in self.policy_learner.actor_optimizers],
             "critic_optimizers": [o.state_dict() for o in self.policy_learner.critic_optimizers],
             "return_sampler": None if self.sampler is None else self.sampler.state_dict(),
+            "lr_decay_start": self._lr_decay_start,
             "layout": self._layout(),
             "iter": self.current_learning_iteration,
             "infos": infos,
@@ -457,14 +560,19 @@ class _SuperMimicRunner:
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict | None:
         """Restore a checkpoint :meth:`save` wrote. ``load_optimizer=False`` leaves the optimizers as they are; the
-        networks, the iteration and the return sampler's bin values are always restored, and the motion term gets
-        the restored reset distribution.
+        networks, the iteration, the start of the learning-rate ramp and the return sampler's bin values are always
+        restored, and the motion term gets the restored reset distribution.
+
+        A checkpoint written without ``policy.ema_decay`` holds no average of the actor; a runner that keeps one
+        starts it from the checkpoint's actor.
 
         A checkpoint trained on another motion library has another number of reset bins. Its policy still replays,
         so the load keeps the networks and leaves the sampler as it is; :meth:`learn` then raises.
         """
         checkpoint = torch.load(path, map_location=map_location or self.device, weights_only=False)
         saved_layout, layout = checkpoint.get("layout"), self._layout()
+        if saved_layout is not None:
+            saved_layout = _LAYOUT_DEFAULTS | saved_layout
         # A checkpoint written before the layout record existed: the algorithm shows in whether it holds a critic.
         if saved_layout is None and (self.critic is None) != (checkpoint["critic"] is None):
             trained = "bptt" if checkpoint["critic"] is None else "actor_critic"
@@ -491,6 +599,17 @@ class _SuperMimicRunner:
                 "reset distribution starts uniform."
             )
         self.actor.load_state_dict(checkpoint["actor"])
+        average = checkpoint.get("actor_ema")
+        if self.actor_ema is not None:
+            self.actor_ema.load_state_dict(checkpoint["actor"] if average is None else average)
+            self.policy_learner.average_started = average is not None
+        elif average is not None:
+            en.logger.warning(
+                f"{path} holds an average of the actor (it was trained with policy.ema_decay > 0), but this runner "
+                "has runner_options.policy.ema_decay=0 and runs the actor itself. Set ema_decay to the value the "
+                "checkpoint was trained with to replay the average."
+            )
+        self._lr_decay_start = checkpoint.get("lr_decay_start")
         self.dynamics.load_state_dict(checkpoint["dynamics"])
         if self.critic is not None:
             self.critic.load_state_dict(checkpoint["critic"])
@@ -518,9 +637,11 @@ class _SuperMimicRunner:
     def get_inference_policy(self, device: str | torch.device | None = None):
         """The deterministic policy on the env's observations: it reads each env's reference frame from the motion
         term. Every env follows the motion goal, whatever ``slot_mix`` the actor trained on, and the proprioception
-        carries no sensor noise. A proprioception history starts from the first observation it is given.
+        carries no sensor noise. A proprioception history starts from the first observation it is given. With
+        ``policy.ema_decay`` the policy is the average of the actor.
         """
-        self.actor.eval()
+        actor = self.actor if self.actor_ema is None else self.actor_ema
+        actor.eval()
         self._history = None
 
         @torch.inference_mode()
@@ -531,7 +652,7 @@ class _SuperMimicRunner:
                     self._seed_history(obs, training=False)
                 else:
                     self._advance_history(sensor, self.env.unwrapped.reset_buf, training=False)
-            return self.actor(self._policy_input(state, sensor, frames, training=False), interface="motion")
+            return actor(self._policy_input(state, sensor, frames, training=False), interface="motion")
 
         return policy
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ from tensordict import TensorDict
 from torch import nn
 
 if TYPE_CHECKING:
+    from eden.learning.wrappers.rsl_rl.supermimic.mirror import Mirror
     from eden.learning.wrappers.rsl_rl.supermimic.models import Dynamics
     from eden.learning.wrappers.rsl_rl.supermimic.options import PolicyOptions, WorldModelOptions
     from eden.learning.wrappers.rsl_rl.supermimic.representation import GenCoordRepresentation
@@ -55,8 +57,16 @@ def optimize(
     params: Iterable[torch.Tensor],
     max_norm: float,
     clip_value: float = 0.0,
+    lr_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """``zero_grad -> backward -> clip the global norm (and each element) -> step``; returns the gradient norm."""
+    """``zero_grad -> backward -> clip the global norm (and each element) -> step``; returns the gradient norm.
+
+    ``lr_scale``, a 0-dim tensor, multiplies the learning rate of every optimizer for this step. The step of Adam
+    and of Muon is proportional to the learning rate, so the parameters move ``lr_scale`` times the step taken at
+    the optimizers' own rate. A captured update reads the tensor on every replay. A changed learning rate of the
+    optimizers would not reach it: ``torch.optim.Muon`` reads its rate on the host, so a recorded update keeps the
+    rate it was recorded with.
+    """
     for optimizer in optimizers:
         optimizer.zero_grad(set_to_none=True)
     loss.backward()
@@ -64,8 +74,13 @@ def optimize(
     grad_norm = torch.nn.utils.clip_grad_norm_(params, max_norm=max_norm)
     if clip_value > 0:
         torch.nn.utils.clip_grad_value_(params, clip_value)
+    before = [p.detach().clone() for p in params] if lr_scale is not None else None
     for optimizer in optimizers:
         optimizer.step()
+    if before is not None:
+        with torch.no_grad():
+            for param, start in zip(params, before, strict=True):
+                param.copy_(torch.lerp(start, param, lr_scale))
     return grad_norm
 
 
@@ -170,15 +185,27 @@ class CapturedUpdate:
 
 class WorldModelLearner:
     """Fits the dynamics to replay-buffer windows: an autoregressive rollout of each window's actions from its first
-    state, scored per channel group with Bryson's rule (weight ``1 / nominal_error^2``).
+    state, scored per channel group with Bryson's rule (weight ``1 / nominal_error^2``). With ``options.mirror_share``,
+    that share of every batch, its first windows, is replaced by its image under ``mirror``.
     """
 
     def __init__(
-        self, dynamics: Dynamics, representation: GenCoordRepresentation, options: WorldModelOptions, device: str
+        self,
+        dynamics: Dynamics,
+        representation: GenCoordRepresentation,
+        options: WorldModelOptions,
+        device: str,
+        mirror: Mirror | None = None,
     ):
+        if (mirror is None) != (options.mirror_share == 0.0):
+            raise ValueError(
+                f"world_model.mirror_share={options.mirror_share} and mirror={mirror!r} disagree: pass a Mirror "
+                "exactly when a share of the batch is mirrored."
+            )
         self.dynamics = dynamics
         self.representation = representation
         self.options = options
+        self.mirror = mirror
         self.params = list(dynamics.mlp.parameters())
         self.optimizers = build_optimizers([dynamics.mlp], options.lr, device=device)
         self.group_weights = {
@@ -208,18 +235,31 @@ class WorldModelLearner:
     def _update_from(self, batches: TensorDict) -> dict[str, torch.Tensor]:
         stats = []
         for batch in batches.unbind(0):
-            states = batch["state"]
+            states, actions, sim_ctx = batch["state"], batch["action"], batch["sim_ctx"]
+            if self.mirror is not None:
+                states, actions, sim_ctx = self._mirror_first(states, actions, sim_ctx)
             rep_states = self._represent(states)
             aux_states = self.representation.aux_state(states)
-            pred_rep, pred_aux = self._rollout(
-                rep_states[:, 0], batch["action"], aux_states[:, 0], batch["sim_ctx"][:, 0]
-            )
+            pred_rep, pred_aux = self._rollout(rep_states[:, 0], actions, aux_states[:, 0], sim_ctx[:, 0])
             loss, group_mse = self._losses(pred_rep, pred_aux, rep_states[:, 1:], aux_states[:, 1:])
             optimize(self.optimizers, loss, self.params, max_norm=1.0)
             stats.append(torch.cat([loss.unsqueeze(0), group_mse]).detach())
         means = torch.stack(stats).mean(0)
         names = ["state", *self.representation.loss_groups]
         return {f"world_model/{name}": value for name, value in zip(names, means, strict=True)}
+
+    def _mirror_first(
+        self, states: torch.Tensor, actions: torch.Tensor, sim_ctx: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The batch with its first ``mirror_share`` windows mirrored. The windows are drawn at random, so their
+        order carries no information.
+        """
+        n, mirror = int(states.shape[0] * self.options.mirror_share), self.mirror
+        return (
+            torch.cat([mirror.state(states[:n]), states[n:]]),
+            torch.cat([mirror.action(actions[:n]), actions[n:]]),
+            torch.cat([mirror.sim_context(sim_ctx[:n]), sim_ctx[n:]]),
+        )
 
     def _rollout_eager(
         self, rep_state: torch.Tensor, actions: torch.Tensor, aux_state: torch.Tensor, sim_ctx: torch.Tensor
@@ -268,6 +308,10 @@ class PolicyLearner:
     plus, for ``algorithm="actor_critic"``, the critic's value of the last state discounted the same way. The critic
     then fits TD(lambda) targets of the same rollouts (5 epochs of 4 minibatches). Values never exceed ``v_max``, the
     return of the largest reward every step. ``algorithm="bptt"`` has no critic and sums the rewards undiscounted.
+
+    With ``options.ema_decay``, :attr:`actor_ema` follows the actor: after each actor step every weight and
+    normalizer statistic moves ``1 - ema_decay`` of the way to the actor's. It starts as a copy of the actor at the
+    first update, when the actor's normalizers hold collected data.
     """
 
     def __init__(
@@ -287,6 +331,12 @@ class PolicyLearner:
         #: The largest discounted return, which bounds the critic.
         self.v_max = max_step_reward / (1.0 - options.gamma) if critic is not None else None
         self.actor_params = list(actor.parameters())
+        #: The Polyak average of the actor, or ``None`` without ``ema_decay``.
+        self.actor_ema = copy.deepcopy(actor).requires_grad_(False).eval() if options.ema_decay > 0.0 else None
+        #: Whether :attr:`actor_ema` holds an average; ``False`` makes the next update start it from the actor.
+        self.average_started = False
+        #: The actor's learning rate over ``options.lr``, or ``None`` when it stays 1.
+        self.lr_scale = torch.tensor(options.lr_multiplier, device=device) if options.lr_multiplier != 1.0 else None
         self.actor_optimizers = build_optimizers([actor], options.lr, betas=(0.9, options.beta2), device=device)
         self.critic_optimizers = build_optimizers([critic], options.lr, device=device) if critic is not None else []
         on_cuda = torch.device(device).type == "cuda"
@@ -294,6 +344,9 @@ class PolicyLearner:
         self._update = CapturedUpdate(self._update_from, self._graph_state)
 
     def update(self, starts: Iterable[TensorDict]) -> dict[str, torch.Tensor]:
+        if self.actor_ema is not None and not self.average_started:
+            self.actor_ema.load_state_dict(self.actor.state_dict())
+            self.average_started = True
         self.actor.train()
         self.wm_env.dynamics.eval()
         self.wm_env.dynamics.requires_grad_(False)
@@ -331,12 +384,28 @@ class PolicyLearner:
             alive = survival if o.survival_masking else 1.0 - term_prob
             ret = ret + self.gamma**o.horizon * value * alive
         loss = (-ret + aux_loss).mean()
-        stats["grad_norm"] = optimize(self.actor_optimizers, loss, self.actor_params, 1.0, o.grad_clip_value)
+        stats["grad_norm"] = optimize(
+            self.actor_optimizers, loss, self.actor_params, 1.0, o.grad_clip_value, self.lr_scale
+        )
+        if self.actor_ema is not None:
+            self._average_actor()
         stats["return"] = ret.mean().detach()
         stats["latent_bc_loss"] = self.actor.auxiliary_loss().mean().detach()
         if self.critic is not None:
             stats["value_loss"] = self._fit_critic(rollout, obs)
         return stats
+
+    @torch.no_grad()
+    def _average_actor(self) -> None:
+        """Move :attr:`actor_ema` towards the actor. A normalizer's sample count is an integer and is copied."""
+        weight = 1.0 - self.options.ema_decay
+        live = [*self.actor.parameters(), *self.actor.buffers()]
+        average = [*self.actor_ema.parameters(), *self.actor_ema.buffers()]
+        for averaged, value in zip(average, live, strict=True):
+            if averaged.is_floating_point():
+                averaged.lerp_(value, weight)
+            else:
+                averaged.copy_(value)
 
     def _fit_critic(self, rollout: list[TensorDict], last_obs: TensorDict) -> torch.Tensor:
         steps = torch.stack(rollout)
@@ -365,7 +434,11 @@ class PolicyLearner:
 
     def _graph_state(self) -> list[torch.Tensor]:
         modules = [self.actor, self.wm_env.dynamics]
+        if self.actor_ema is not None:
+            modules.append(self.actor_ema)
         state = graph_state(modules, self.actor_optimizers)
+        if self.lr_scale is not None:
+            state.append(self.lr_scale)
         if self.critic is not None:
             state += graph_state([self.critic], self.critic_optimizers)
         return state

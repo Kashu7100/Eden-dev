@@ -1,9 +1,14 @@
-"""``SuperMimicRunnerOptions``: the base runner options it narrows or refuses."""
+"""``SuperMimicRunnerOptions``: the base runner options it narrows or refuses, and the ranges of its own."""
 
 import pytest
 from pydantic import ValidationError
 
-from eden.learning.wrappers.rsl_rl.supermimic import PolicyOptions, SuperMimicRunnerOptions
+from eden.learning.wrappers.rsl_rl.supermimic import (
+    PolicyOptions,
+    ReturnSamplerOptions,
+    SuperMimicRunnerOptions,
+    WorldModelOptions,
+)
 
 
 def test_the_runner_is_named_by_import_path():
@@ -45,3 +50,41 @@ def test_the_actor_critic_needs_a_discount_below_one():
     with pytest.raises(ValidationError, match=r"0 < gamma < 1 and 0 <= lam <= 1, got gamma=1.0, lam=0.95"):
         PolicyOptions(gamma=1.0)
     assert PolicyOptions(algorithm="bptt", gamma=1.0).gamma == 1.0
+
+
+def test_an_actor_average_decay_outside_zero_to_one_is_refused():
+    with pytest.raises(ValidationError, match=r"ema_decay must be in \[0, 1\), got 1.0"):
+        PolicyOptions(ema_decay=1.0)
+    assert PolicyOptions(ema_decay=0.995).ema_decay == 0.995
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"lr_decay_return": 0.75}, r"\{'lr_decay_return': 0.75\} ramp lr_multiplier to 1, but lr_multiplier is"),
+        ({"lr_decay_deadline": 350}, r"\{'lr_decay_deadline': 350\} ramp lr_multiplier to 1, but lr_multiplier is"),
+        ({"lr_multiplier": 0.0}, r"lr_multiplier must be positive, got 0.0"),
+        (
+            {"lr_multiplier": 4.0, "lr_decay_return": 1.5},
+            r"lr_decay_return is a normalized return, in \(0, 1\], got 1.5",
+        ),
+        ({"lr_multiplier": 4.0, "lr_decay_iterations": 0}, r"lr_decay_iterations must be at least 1, got 0"),
+    ],
+    ids=["return_without_multiplier", "deadline_without_multiplier", "multiplier", "return_range", "ramp_length"],
+)
+def test_a_learning_rate_schedule_that_cannot_run_is_refused(options, message):
+    with pytest.raises(ValidationError, match=message):
+        PolicyOptions(**options)
+
+
+def test_a_mirror_share_outside_the_batch_is_refused():
+    with pytest.raises(ValidationError, match=r"mirror_share is a share of the batch, in \[0, 1\], got 1.5"):
+        WorldModelOptions(mirror_share=1.5)
+
+
+def test_the_new_learner_options_default_to_off():
+    policy, world_model, sampler = PolicyOptions(), WorldModelOptions(), ReturnSamplerOptions()
+    assert (policy.ema_decay, policy.reference_action, policy.lr_multiplier) == (0.0, False, 1.0)
+    assert (policy.lr_decay_return, policy.lr_decay_deadline) == (None, None)
+    assert world_model.mirror_share == 0.0
+    assert sampler.failure == 0.0

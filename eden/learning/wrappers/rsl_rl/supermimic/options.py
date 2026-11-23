@@ -27,6 +27,10 @@ class WorldModelOptions(ConfigurableOptions):
         Steps per window, rolled out autoregressively from the window's first state.
     nominal_error_root_pos, nominal_error_root_ori, nominal_error_joint_pos, nominal_error_joint_vel : float
         Nominal error of each channel group of the state loss; a group is weighted by ``1 / nominal_error^2``.
+    mirror_share : float
+        Share of each batch, in ``[0, 1]``, replaced by its left-right mirror image
+        (:class:`~eden.learning.wrappers.rsl_rl.supermimic.mirror.Mirror`); 0 mirrors nothing. The robot and the
+        task's randomization must be mirror symmetric, which the runner checks at construction.
     """
 
     hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
@@ -38,6 +42,13 @@ class WorldModelOptions(ConfigurableOptions):
     nominal_error_root_ori: float = 0.02
     nominal_error_joint_pos: float = 0.1
     nominal_error_joint_vel: float = 3.14
+    mirror_share: float = 0.0
+
+    @model_validator(mode="after")
+    def _check(self) -> WorldModelOptions:
+        if not 0.0 <= self.mirror_share <= 1.0:
+            raise ValueError(f"mirror_share is a share of the batch, in [0, 1], got {self.mirror_share}.")
+        return self
 
 
 class PolicyOptions(ConfigurableOptions):
@@ -50,6 +61,29 @@ class PolicyOptions(ConfigurableOptions):
         rollouts; ``"bptt"`` uses the imagined return alone.
     lr : float
         Learning rate of the actor and the critic.
+    lr_multiplier : float
+        The actor steps at ``lr * lr_multiplier``; the critic keeps ``lr``.
+    lr_decay_return : float | None
+        Once the mean normalized return of an iteration reaches this, ``lr_multiplier`` ramps linearly to 1 over
+        ``lr_decay_iterations`` iterations. The normalized return of an episode is its summed reward over its
+        length times the largest reward of one step, in ``(-inf, 1]``; the runner averages it over the episodes
+        that ended during the iteration and logs it as ``Train/mean_normalized_return``. It is the simulator's
+        reward of the collecting actor, BlinkMimic's ``ep_ret_norm``, which BlinkMimic averages over 125 env steps
+        where one iteration here has ``num_steps_per_env``. ``None`` leaves the return out of the schedule.
+    lr_decay_deadline : int | None
+        The iteration at which the ramp starts if the return has not started it; ``None`` sets no deadline.
+    lr_decay_iterations : int
+        Iterations the ramp takes.
+    ema_decay : float
+        Decay per actor step of a Polyak average of the actor, its weights and normalizer statistics, in
+        ``[0, 1)``. Replay (``eden inference``, ``get_inference_policy``) runs the average, and collection keeps the
+        trained actor. 0 keeps no average.
+    reference_action : bool
+        Add the action that commands the reference pose of the next frame, ``(q_ref - q0) / action scale``, to the
+        actor's output, so the network learns a correction to tracking the reference with the joint controller.
+        The scale and ``q0`` are the action term's. The network's output layer starts small, so the untrained
+        actor commands nearly the reference pose. A checkpoint records the option and loads only under the value it
+        trained with.
     num_batches : int
         Actor steps per update, one imagined batch each.
     batch_size : int
@@ -91,6 +125,12 @@ class PolicyOptions(ConfigurableOptions):
 
     algorithm: Literal["actor_critic", "bptt"] = "actor_critic"
     lr: float = 2e-4
+    lr_multiplier: float = 1.0
+    lr_decay_return: float | None = None
+    lr_decay_deadline: int | None = None
+    lr_decay_iterations: int = 75
+    ema_decay: float = 0.0
+    reference_action: bool = False
     num_batches: int = 1
     batch_size: int = 4096
     horizon: int = 32
@@ -129,6 +169,29 @@ class PolicyOptions(ConfigurableOptions):
                 f"algorithm='actor_critic' bounds the critic by max_step_reward / (1 - gamma), so it needs "
                 f"0 < gamma < 1 and 0 <= lam <= 1, got gamma={self.gamma}, lam={self.lam}. For an undiscounted "
                 "objective set algorithm='bptt'."
+            )
+        if not 0.0 <= self.ema_decay < 1.0:
+            raise ValueError(f"ema_decay must be in [0, 1), got {self.ema_decay}. 0 keeps no average of the actor.")
+        if self.lr_multiplier <= 0.0:
+            raise ValueError(f"lr_multiplier must be positive, got {self.lr_multiplier}.")
+        if self.lr_decay_return is not None and not 0.0 < self.lr_decay_return <= 1.0:
+            raise ValueError(
+                f"lr_decay_return is a normalized return, in (0, 1], got {self.lr_decay_return}. Set it to None to "
+                "leave the return out of the schedule."
+            )
+        if self.lr_decay_deadline is not None and self.lr_decay_deadline < 0:
+            raise ValueError(f"lr_decay_deadline is an iteration, got {self.lr_decay_deadline}.")
+        if self.lr_decay_iterations < 1:
+            raise ValueError(f"lr_decay_iterations must be at least 1, got {self.lr_decay_iterations}.")
+        decay = {
+            name: getattr(self, name)
+            for name in ("lr_decay_return", "lr_decay_deadline")
+            if getattr(self, name) is not None
+        }
+        if decay and self.lr_multiplier == 1.0:
+            raise ValueError(
+                f"{decay} ramp lr_multiplier to 1, but lr_multiplier is already 1.0, so they would change nothing. "
+                "Set lr_multiplier, or leave them at None."
             )
         return self
 
@@ -172,6 +235,12 @@ class ReturnSamplerOptions(ConfigurableOptions):
         Share of resets spread uniformly over the bins.
     keep : float
         Share of resets on the bins in proportion to the summed squared focus they received.
+    failure : float
+        Share of resets on the bins up to ``failure_lead_s`` before the frames where episodes recently ended in a
+        fall, within the fall's clip, in proportion to a decayed fall rate. Until a fall is recorded the share goes
+        to the other three in their proportions. 0 records no falls.
+    failure_lead_s : float
+        How long before a fall the resets of the ``failure`` share start, at most.
     """
 
     enabled: bool = True
@@ -181,13 +250,25 @@ class ReturnSamplerOptions(ConfigurableOptions):
     steepness: float = 25.0
     explore: float = 0.5
     keep: float = 0.1
+    failure: float = 0.0
+    failure_lead_s: float = 1.0
 
     @model_validator(mode="after")
     def _check(self) -> ReturnSamplerOptions:
         if not 0.0 < self.gamma < 1.0:
             raise ValueError(f"return sampler gamma must be in (0, 1), got {self.gamma}.")
-        if self.explore + self.keep >= 1.0:
-            raise ValueError(f"explore ({self.explore}) + keep ({self.keep}) must leave a share for the focus.")
+        if min(self.explore, self.keep, self.failure) < 0.0:
+            raise ValueError(
+                f"explore ({self.explore}), keep ({self.keep}) and failure ({self.failure}) are shares of the "
+                "resets and cannot be negative."
+            )
+        if self.explore + self.keep + self.failure >= 1.0:
+            raise ValueError(
+                f"explore ({self.explore}) + keep ({self.keep}) + failure ({self.failure}) must leave a share for "
+                "the focus."
+            )
+        if self.failure_lead_s <= 0.0:
+            raise ValueError(f"failure_lead_s must be positive, got {self.failure_lead_s}.")
         return self
 
 
