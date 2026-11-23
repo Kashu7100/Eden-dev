@@ -274,9 +274,9 @@ class ReacherConfig(EdenRLConfig):
 
 <div class="eden-card" markdown>
 
-![Two arms folding a towel](assets/readme/mochi_fold.webp)
+![Two arms folding a T-shirt in thirds on a kitchen table](assets/readme/mochi_fold_shirt.webp)
 
-**Cloth manipulation**: two arms fold a towel in half.
+**Cloth manipulation**: two arms fold a T-shirt in thirds.
 
 </div>
 
