@@ -36,7 +36,7 @@ class ReplayBuffer:
         self._step = 0
         #: Writes so far, and per sequence length the valid windows counted at that many writes.
         self._writes = 0
-        self._windows: dict[int, tuple[int, torch.Tensor, bool]] = {}
+        self._windows: dict[int, tuple[int, torch.Tensor, torch.Tensor, bool]] = {}
         self._storage = TensorDict(
             {
                 name: torch.zeros(s.shape(num_envs, buffer_size), dtype=s.dtype, device=device)
@@ -69,9 +69,10 @@ class ReplayBuffer:
         """The slot of the oldest stored step: slot = (base + age) % buffer_size."""
         return self._step if self.num_transitions == self.buffer_size else 0
 
-    def _valid_windows(self, sequence_length: int) -> tuple[torch.Tensor, bool]:
-        """``(num_envs, buffer_size)`` cumulative count, by age of the first step, of the windows of
-        ``sequence_length`` steps with no episode end before their last step, and whether there is any.
+    def _valid_windows(self, sequence_length: int) -> tuple[torch.Tensor, torch.Tensor, bool]:
+        """The windows of ``sequence_length`` steps with no episode end before their last step: each env's count
+        ``(num_envs,)``, the cumulative counts by age of the first step, flattened and offset per env for
+        :meth:`sample`'s search, and whether there is any window.
 
         Counted once per write: the samples drawn between two writes share the count and its one host read.
         """
@@ -80,19 +81,23 @@ class ReplayBuffer:
             raise ValueError(f"sequence_length {L} exceeds buffer_size {T}.")
         cached = self._windows.get(L)
         if cached is not None and cached[0] == self._writes:
-            return cached[1], cached[2]
+            return cached[1:]
         ages = torch.arange(T, device=self.device)
-        ended = (self._storage["terminated"] | self._storage["truncated"])[:, (self._base() + ages) % T].long()
+        ended = (self._storage["terminated"] | self._storage["truncated"])[:, (self._base() + ages) % T].int()
         # Window [a, a+L-1] has no end before its last step iff the end count over [a, a+L-2] is zero.
-        c = torch.cat([ended.new_zeros(E, 1), ended.cumsum(1), ended.new_zeros(E, L - 1)], dim=1)
+        ends = ended.cumsum(1, dtype=torch.int32)
+        c = torch.cat([ended.new_zeros(E, 1), ends, ended.new_zeros(E, L - 1)], dim=1)
         valid = (c[:, L - 1 : L - 1 + T] == c[:, :T]) & (ages + L - 1 < n)
-        csum = valid.cumsum(dim=1)
-        self._windows[L] = (self._writes, csum, bool((csum[:, -1] > 0).any()))
+        csum = valid.cumsum(dim=1, dtype=torch.int32)
+        total = csum[:, -1].clone()
+        # Env e's counts lie in [0, T]: shifted by e (T + 1) they sort after env e - 1's and before env e + 1's.
+        flat = (csum + torch.arange(E, device=self.device)[:, None] * (T + 1)).view(-1)
+        self._windows[L] = (self._writes, total, flat, bool((total > 0).any()))
         return self._windows[L][1:]
 
     def has_window(self, sequence_length: int) -> bool:
         """Whether :meth:`sample` has a window of ``sequence_length`` steps to draw."""
-        return self._valid_windows(sequence_length)[1]
+        return self._valid_windows(sequence_length)[2]
 
     def sample(self, sequence_length: int, batch_size: int) -> TensorDict:
         """``(batch_size, sequence_length)`` windows of consecutive steps that no episode end interrupts.
@@ -103,8 +108,7 @@ class ReplayBuffer:
         """
         L, B, T, n = sequence_length, batch_size, self.buffer_size, self.num_transitions
         base, dev = self._base(), self.device
-        csum, any_window = self._valid_windows(L)
-        total = csum[:, -1]
+        total, flat, any_window = self._valid_windows(L)
         if not any_window:
             raise RuntimeError(
                 f"no window of {L} steps without an episode end among {n} stored steps. Check has_window({L}) "
@@ -112,7 +116,8 @@ class ReplayBuffer:
             )
         env_idx = torch.multinomial((total > 0).float(), B, replacement=True)
         u = (torch.rand(B, device=dev) * total[env_idx].float()).long()
-        start = torch.searchsorted(csum[env_idx], u[:, None], right=True).squeeze(-1)
+        # The first age of env_idx whose cumulative count exceeds u, by one search of the flattened counts.
+        start = torch.searchsorted(flat, u + env_idx * (T + 1), right=True) - env_idx * T
         slots = (base + start[:, None] + torch.arange(L, device=dev)) % T
         return self._storage[env_idx[:, None], slots]
 
