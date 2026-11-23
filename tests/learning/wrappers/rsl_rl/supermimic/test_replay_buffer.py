@@ -100,3 +100,23 @@ def test_samples_between_two_writes_draw_as_from_a_buffer_never_sampled():
     again = sampled.sample(sequence_length=3, batch_size=50)["t"]
     torch.set_rng_state(state)
     assert torch.equal(again, fresh.sample(sequence_length=3, batch_size=50)["t"])
+
+
+def test_naming_the_fields_to_return_draws_the_same_windows():
+    buffer = _filled(steps=14, ends={3, 9})
+    torch.manual_seed(0)
+    whole = buffer.sample(sequence_length=3, batch_size=50)
+    torch.manual_seed(0)
+    part = buffer.sample(sequence_length=3, batch_size=50, fields=("t",))
+    assert set(part.keys()) == {"t"}
+    assert torch.equal(part["t"], whole["t"])
+
+
+def test_several_batches_at_once_are_the_batches_successive_calls_draw():
+    buffer = _filled(steps=14, ends={3, 9})
+    torch.manual_seed(0)
+    one_by_one = torch.stack([buffer.sample(sequence_length=3, batch_size=20)["t"] for _ in range(4)])
+    torch.manual_seed(0)
+    together = buffer.sample(sequence_length=3, batch_size=20, num_batches=4)
+    assert together.shape == (4, 20, 3)
+    assert torch.equal(together["t"], one_by_one)

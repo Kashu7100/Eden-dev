@@ -512,9 +512,11 @@ class _SuperMimicRunner:
                         if not self.replay_buffer.has_window(world_model.horizon):
                             continue
                         t1 = time.time()
-                        windows = (
-                            self.replay_buffer.sample(world_model.horizon, world_model.batch_size)
-                            for _ in range(world_model.num_batches)
+                        windows = self.replay_buffer.sample(
+                            world_model.horizon,
+                            world_model.batch_size,
+                            fields=WorldModelLearner.FIELDS,
+                            num_batches=world_model.num_batches,
                         )
                         losses.update(self.world_model_learner.update(windows))
                         starts = (

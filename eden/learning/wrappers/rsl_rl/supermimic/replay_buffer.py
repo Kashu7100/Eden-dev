@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -34,7 +35,7 @@ class ReplayBuffer:
         self.device = device
         self.num_transitions = 0
         self._step = 0
-        #: Writes so far, and per sequence length the valid windows counted at that many writes.
+        #: Writes so far, and per sequence length the valid windows with the stamp they were counted at.
         self._writes = 0
         self._windows: dict[int, tuple[int, torch.Tensor, torch.Tensor, bool]] = {}
         self._storage = TensorDict(
@@ -79,8 +80,11 @@ class ReplayBuffer:
         L, E, T, n = sequence_length, self.num_envs, self.buffer_size, self.num_transitions
         if L > T:
             raise ValueError(f"sequence_length {L} exceeds buffer_size {T}.")
+        # A window of one step holds no step before its last, so the one-step windows change with the number of
+        # stored steps alone: once the buffer is full they are counted for good.
+        stamp = n if L == 1 else self._writes
         cached = self._windows.get(L)
-        if cached is not None and cached[0] == self._writes:
+        if cached is not None and cached[0] == stamp:
             return cached[1:]
         ages = torch.arange(T, device=self.device)
         ended = (self._storage["terminated"] | self._storage["truncated"])[:, (self._base() + ages) % T].int()
@@ -92,19 +96,29 @@ class ReplayBuffer:
         total = csum[:, -1].clone()
         # Env e's counts lie in [0, T]: shifted by e (T + 1) they sort after env e - 1's and before env e + 1's.
         flat = (csum + torch.arange(E, device=self.device)[:, None] * (T + 1)).view(-1)
-        self._windows[L] = (self._writes, total, flat, bool((total > 0).any()))
+        self._windows[L] = (stamp, total, flat, bool((total > 0).any()))
         return self._windows[L][1:]
 
     def has_window(self, sequence_length: int) -> bool:
         """Whether :meth:`sample` has a window of ``sequence_length`` steps to draw."""
         return self._valid_windows(sequence_length)[2]
 
-    def sample(self, sequence_length: int, batch_size: int) -> TensorDict:
+    def sample(
+        self,
+        sequence_length: int,
+        batch_size: int,
+        fields: Sequence[str] | None = None,
+        num_batches: int | None = None,
+    ) -> TensorDict:
         """``(batch_size, sequence_length)`` windows of consecutive steps that no episode end interrupts.
 
         A window may end on a terminating or truncating step but holds none before its last step. An env is drawn
         uniformly among those with a valid window, and a window uniformly within its env, so a window of an env
-        with few valid windows is drawn more often than one of an env with many.
+        with few valid windows is drawn more often than one of an env with many. ``fields`` names the stored fields
+        to return, every one by default; the windows drawn do not depend on it.
+
+        ``num_batches`` returns ``(num_batches, batch_size, sequence_length)``: the windows that many successive
+        calls would draw, in their order, located and gathered together.
         """
         L, B, T, n = sequence_length, batch_size, self.buffer_size, self.num_transitions
         base, dev = self._base(), self.device
@@ -114,12 +128,20 @@ class ReplayBuffer:
                 f"no window of {L} steps without an episode end among {n} stored steps. Check has_window({L}) "
                 "before sampling."
             )
-        env_idx = torch.multinomial((total > 0).float(), B, replacement=True)
-        u = (torch.rand(B, device=dev) * total[env_idx].float()).long()
+        weights = (total > 0).float()
+        # One batch after the other, so the random stream is that of one call per batch.
+        draws = [
+            (torch.multinomial(weights, B, replacement=True), torch.rand(B, device=dev))
+            for _ in range(1 if num_batches is None else num_batches)
+        ]
+        env_idx, uniform = (torch.cat(column) if len(draws) > 1 else column[0] for column in zip(*draws, strict=True))
+        u = (uniform * total[env_idx].float()).long()
         # The first age of env_idx whose cumulative count exceeds u, by one search of the flattened counts.
         start = torch.searchsorted(flat, u + env_idx * (T + 1), right=True) - env_idx * T
         slots = (base + start[:, None] + torch.arange(L, device=dev)) % T
-        return self._storage[env_idx[:, None], slots]
+        storage = self._storage if fields is None else self._storage.select(*fields)
+        windows = storage[env_idx[:, None], slots]
+        return windows if num_batches is None else windows.reshape(num_batches, B, L)
 
     def sample_causal(self, sequence_length: int, batch_size: int) -> tuple[TensorDict, torch.Tensor]:
         """Windows of ``sequence_length`` steps ending at uniformly drawn stored steps, and their padding mask.

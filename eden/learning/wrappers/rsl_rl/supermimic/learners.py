@@ -195,6 +195,9 @@ class WorldModelLearner:
     that share of every batch, its first windows, is replaced by its image under ``mirror``.
     """
 
+    #: The replay-buffer fields a window is fit on.
+    FIELDS = ("state", "action", "sim_ctx")
+
     def __init__(
         self,
         dynamics: Dynamics,
@@ -233,10 +236,13 @@ class WorldModelLearner:
         for normalizer in self.dynamics.normalizers():
             normalizer.eval()
 
-    def update(self, windows: Iterable[TensorDict]) -> dict[str, torch.Tensor]:
+    def update(self, windows: TensorDict | Iterable[TensorDict]) -> dict[str, torch.Tensor]:
+        """One optimizer step per batch of ``windows``: ``(num_batches, batch_size, horizon)``, or its batches."""
         self.dynamics.mlp.train()
         self.dynamics.mlp.requires_grad_(True)
-        return self._update(torch.stack([w.select("state", "action", "sim_ctx") for w in windows]))
+        if not isinstance(windows, TensorDict):
+            windows = torch.stack([w.select(*self.FIELDS) for w in windows])
+        return self._update(windows.select(*self.FIELDS))
 
     def _update_from(self, batches: TensorDict) -> dict[str, torch.Tensor]:
         stats = []

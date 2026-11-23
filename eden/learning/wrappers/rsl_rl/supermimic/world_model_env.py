@@ -208,11 +208,15 @@ class WorldModelEnv:
         return torch.where(pad.unsqueeze(-1), shared.unsqueeze(1), noisy)
 
 
+#: The stored fields :meth:`WorldModelEnv.reset` reads of a start state.
+START_FIELDS = ("state", "prev_action", "sim_ctx", "frame")
+
+
 def sample_starts(buffer: ReplayBuffer, history_length: int, batch_size: int) -> TensorDict:
     """Start states for :meth:`WorldModelEnv.reset`. With a history, each also carries ``sensor_window``, the frames
     ending at it, and ``pad_mask``, which of them repeat the episode's first frame.
     """
     if history_length == 1:
-        return buffer.sample(1, batch_size).squeeze(1)
+        return buffer.sample(1, batch_size, fields=START_FIELDS).squeeze(1)
     window, padded = buffer.sample_causal(history_length, batch_size)
     return window[:, -1].set("sensor_window", window["actor_obs"]).set("pad_mask", padded)
