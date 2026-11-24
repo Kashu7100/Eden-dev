@@ -31,6 +31,7 @@ from eden.managers.metric_manager import METRIC_TERM_REGISTRY, MetricTerm
 from eden.managers.observation_manager import OBSERVATION_TERM_REGISTRY, ObservationTerm
 from eden.managers.reward_manager import REWARD_TERM_REGISTRY, RewardTerm
 from eden.managers.terms.utils import resolve_metric_manager, resolve_metric_term
+from eden.tasks.mochi.common import resolve_one_mesh_soft_body
 from eden.utils.plane_grid import PlaneGrid
 from eden.utils.string import term_subject
 
@@ -296,7 +297,7 @@ class ReachDirtyCell(RewardTerm):
     face_depth: float = 0.006
 
     def build(self) -> None:
-        self.resolve_entity(self.entity_name)
+        resolve_one_mesh_soft_body(self, self.entity_name)
         self._wipe = resolve_metric_term(
             self._env, term="ReachDirtyCell", metric_name=self.metric_name, expected=BarStripeWipe
         )

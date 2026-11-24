@@ -223,6 +223,7 @@ def func_assemble(
                 soft_info,
                 soft_state,
                 rigid_config,
+                mochi_config,
                 skip_ls_done,
             )
             func_pc_collider_eval(
@@ -424,6 +425,7 @@ def func_assemble(
                 soft_info,
                 soft_state,
                 rigid_config,
+                mochi_config,
                 assem_obj,
                 assem_res,
                 assem_dres,
@@ -522,6 +524,7 @@ def func_linear_solve_env(
                     soft_state,
                     island_state,
                     rigid_config,
+                    mochi_config,
                 )
             func_cholesky_solve_islands(
                 i_b,
@@ -752,6 +755,7 @@ def kernel_step_monolith(
                 soft_info,
                 soft_state,
                 rigid_config,
+                mochi_config,
                 errno,
             )
         func_build_islands(
@@ -774,6 +778,7 @@ def kernel_step_monolith(
             mochi_config.has_dense,
             mochi_config.has_equalities,
             mochi_config.use_sleeping,
+            mochi_config.has_soft_variants,
         )
 
         # Newton iterations with the configured line search. Every round evaluates the residual at the current iterate

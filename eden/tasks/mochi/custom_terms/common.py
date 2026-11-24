@@ -9,11 +9,11 @@ from eden.managers.metric_manager import METRIC_TERM_REGISTRY, MetricTerm
 from eden.managers.observation_manager import OBSERVATION_TERM_REGISTRY, ObservationTerm
 from eden.managers.reward_manager import REWARD_TERM_REGISTRY, RewardTerm
 from eden.managers.terms.utils import resolve_metric_manager
-from eden.tasks.mochi.common import link_point
+from eden.tasks.mochi.common import link_point, resolve_one_mesh_soft_body
 
 
 def _soft_vertices(term, entity_name: str, vertices: list[int]) -> torch.Tensor:
-    body = term.resolve_entity(entity_name)
+    body = resolve_one_mesh_soft_body(term, entity_name)
     bad = [v for v in vertices if not -body.n_vertices <= v < body.n_vertices]
     if not vertices or bad:
         raise ValueError(
@@ -79,6 +79,7 @@ class ReachSoftBody(RewardTerm):
     std: float = 0.1
 
     def build(self) -> None:
+        resolve_one_mesh_soft_body(self, self.entity_name)
         self._vertices = _soft_vertices(self, self.entity_name, self.vertices) if self.vertices else None
         self._link = self.resolve_entity(self.robot_name).get_link(self.link_name)
         self._offset = torch.tensor(self.link_offset, device=self.device)
@@ -110,7 +111,7 @@ class GripHeld(RewardTerm):
     min_height: float = 0.01
 
     def build(self) -> None:
-        self.resolve_entity(self.entity_name)
+        resolve_one_mesh_soft_body(self, self.entity_name)
         resolve_metric_manager(self._env, term="grip_held", metric_name=self.grip_metric_name)
 
     def compute(self) -> torch.Tensor:
@@ -147,7 +148,7 @@ class HandsClear(MetricTerm):
     success_threshold: float = 0.02
 
     def build(self) -> None:
-        self.resolve_entity(self.entity_name)
+        resolve_one_mesh_soft_body(self, self.entity_name)
         self._links = [self.resolve_entity(name).get_link(self.link_name) for name in self.robots_name]
         self._offset = torch.tensor(self.link_offset, device=self.device)
 

@@ -49,10 +49,12 @@ def func_rod_band_factor(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
     eps,
 ):
     """Assemble the banded Hessian block of every open rod of the running conjugate gradient environments from the
-    element and stencil blocks (Dirichlet rows and columns replaced by the identity) and factor it in place.
+    element and stencil blocks (Dirichlet rows and columns replaced by the identity) and factor it in place. The block
+    of an absent variant of a heterogeneous rod, which assembles nothing, is the identity.
     """
     n_entities = soft_info.entities_band_n.shape[0]
     _B = soft_state.verts_pos.shape[1]
@@ -65,10 +67,17 @@ def func_rod_band_factor(
         if n == 0 or not mochi_state.pcg_is_active[i_b]:
             continue
         start = soft_info.entities_band_start[i_e]
+        is_absent = False
+        if qd.static(mochi_config.has_soft_variants):
+            is_absent = not soft_info.entities_is_active[i_e, i_b]
         for r in range(n):
             for d in qd.static(range(ROD_BAND + 1)):
                 soft_state.rod_band[start + r, d, i_b] = 0.0
             soft_state.rod_band[start + r, 0, i_b] = mochi_state.dofs_H_diag[soft_info.band_rows_dof[start + r], i_b]
+            if is_absent:
+                soft_state.rod_band[start + r, 0, i_b] = 1.0
+        if is_absent:
+            continue
         for i_r in range(soft_info.entities_rod_elem_start[i_e], soft_info.entities_rod_elem_end[i_e]):
             if soft_info.rod_elems_L[i_r] <= 0.0:
                 continue

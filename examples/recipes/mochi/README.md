@@ -39,6 +39,7 @@ CUDA-only.
 | `newton_cradle.py` | `newton_cradle.py` | Newton's five-ball cradle; BDF2 + substeps vs backward Euler |
 | — | `newton_cradle_nyx.py` | The same cradle path traced by Nyx: polished steel balls under studio light (needs the `nyx` extra) |
 | `cloth.py` | `cloth.py` | A sheet draped over a box, and a ball caught by a sheet whose corners sway |
+| — | `cloth_heterogeneous.py` | Four parallel envs, each draping a sheet of a different size and resolution (`GroupedEntityOptions` with a shell material) |
 | `cloth_p1q6.py` | `cloth_p1q6.py` | Contact-quadrature A/B: how far a box edge shows through a coarse drape |
 | `soft_duck.py` | `soft_duck.py` | The mochi duck (1899 nodes) dropped on the ground (benchmark scene) |
 | `cloth_tshirt.py` | `cloth_tshirt.py` | The mochi t-shirt (3593 nodes, self-contact) falling (benchmark scene); a 1 mm shell where the fork uses 2 mm |

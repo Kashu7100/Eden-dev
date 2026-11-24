@@ -179,7 +179,7 @@ class MochiSoftEntity(Entity):
     ):
         self._is_shell = isinstance(spec.material, mochi_materials.Shell)
         self._is_rod = isinstance(spec.material, mochi_materials.Rod)
-        if self._is_rod != isinstance(spec.morph, Rod):
+        if self._is_rod != isinstance(spec.morphs[0], Rod):
             gs.raise_exception(
                 "A `Rod` morph (eden.engine.solvers.mochi.morphs) requires a `Rod` material "
                 "(eden.engine.solvers.mochi.materials), and conversely."
@@ -191,6 +191,10 @@ class MochiSoftEntity(Entity):
         self._vface_start = vface_start
         self._attachments = []
         self._contact_skin = None
+        # The heterogeneous entity this body is a variant of, and its index among the variants (see
+        # `MochiSoftVariantsEntity`); None for a body of its own.
+        self._variants_owner = None
+        self._variant_idx = None
 
         self.sample()
 
@@ -425,6 +429,8 @@ class MochiSoftEntity(Entity):
         damping : float, optional
             Damping d on the violation rate, adding 1/2 (d / dt) |c - c_stage_start|^2 per stage. Defaults to 0.
         """
+        if self._variants_owner is not None:
+            self._variants_owner._raise_unsupported("attach_to_link")
         if self._is_built:
             gs.raise_exception("Attachments must be registered before the scene is built.")
         verts_idx = np.unique(np.asarray(verts_idx, dtype=gs.np_int).reshape((-1,)))
@@ -520,6 +526,19 @@ class MochiSoftEntity(Entity):
         mesh.vertices = verts
         return mesh
 
+    def _refuse_variant_setter(self, method):
+        """Refuse a state or contact setter on a variant of a heterogeneous entity: it would write every environment,
+        the ones that hold another variant included, where the body must stay fixed at rest and out of contact.
+        """
+        if self._variants_owner is not None:
+            owner = self._variants_owner
+            gs.raise_exception(
+                f"`{method}` on variant {self._variant_idx} of heterogeneous entity '{owner.name}' would write every "
+                "environment, also those holding another variant, where this body is absent and must stay fixed at "
+                f"rest. Call it on the heterogeneous entity instead, `variant.variants_owner.{method}(...)`: it writes "
+                "the variant each targeted environment holds."
+            )
+
     def get_vertices_position(self, envs_idx=None):
         """World positions of the vertices, shape (n_vertices, 3) or (n_envs, n_vertices, 3)."""
         return self._solver.get_soft_vertices_position(self, envs_idx)
@@ -539,12 +558,20 @@ class MochiSoftEntity(Entity):
         the surface element (`verts_a` / `verts_b`, local to this body, -1 padded) and the weights spreading the force
         over them (`bary_a` / `bary_b`).
         """
+        if self._variants_owner is not None:
+            # A contact record names the heterogeneous entity, whichever variant made it
+            gs.raise_exception(
+                f"The contacts of variant {self._variant_idx} of heterogeneous entity '{self._variants_owner.name}' "
+                "are recorded under that entity: read them with `variant.variants_owner.get_contacts(...)`, and select "
+                "the environments holding this variant with `variant.variants_owner.envs_variant_idx`."
+            )
         return filter_entity_contacts(self._solver, self, with_entity, exclude_self_contact, is_padded)
 
     def set_position(self, pos, envs_idx=None):
         """Move the body: a (3,) or (n_envs, 3) offset of the rest positions, or full vertex positions of shape
         (n_vertices, 3) or (n_envs, n_vertices, 3).
         """
+        self._refuse_variant_setter("set_position")
         pos = torch.as_tensor(tensor_to_array(pos), dtype=gs.tc_float, device=gs.device)
         if pos.shape[-2:] != (self.n_vertices, 3):
             pos = torch.as_tensor(self.init_positions, dtype=gs.tc_float, device=gs.device) + pos[..., None, :]
@@ -554,6 +581,7 @@ class MochiSoftEntity(Entity):
         """Set the vertex velocities: one (3,) or (n_envs, 3) velocity for all vertices, or per vertex of shape
         (n_vertices, 3) or (n_envs, n_vertices, 3).
         """
+        self._refuse_variant_setter("set_velocity")
         vel = torch.as_tensor(tensor_to_array(vel), dtype=gs.tc_float, device=gs.device)
         if vel.shape[-2:] != (self.n_vertices, 3):
             vel = vel[..., None, :].expand(*vel.shape[:-1], self.n_vertices, 3)
@@ -583,6 +611,7 @@ class MochiSoftEntity(Entity):
         `verts_idx_local` is one set for every environment, shape (n,), or one set per environment, shape (n_envs, n),
         whose -1 entries are skipped.
         """
+        self._refuse_variant_setter("set_vertices_fixed")
         self._solver.set_soft_vertices_fixed(self, self._sanitize_vertices_idx(verts_idx_local), is_fixed, envs_idx)
 
     def set_vertices_target(self, verts_idx_local, pos, envs_idx=None):
@@ -593,6 +622,7 @@ class MochiSoftEntity(Entity):
         or one set per environment, shape (n_envs, n) whose -1 entries are skipped, with `pos` of shape (n_envs, n, 3).
         This is how a gripper carries whichever vertices it closed on in each environment.
         """
+        self._refuse_variant_setter("set_vertices_target")
         self._solver.set_soft_vertices_target(self, self._sanitize_vertices_idx(verts_idx_local), pos, envs_idx)
 
     def set_contact_params(
@@ -607,6 +637,7 @@ class MochiSoftEntity(Entity):
         normal_viscous_damping=None,
     ):
         """Update the contact parameters of this body (see `eden.engine.solvers.mochi.materials.Elastic`)."""
+        self._refuse_variant_setter("set_contact_params")
         self._solver.set_soft_entity_contact_params(
             self,
             penalty_coefficient=penalty_coefficient,
@@ -625,6 +656,16 @@ class MochiSoftEntity(Entity):
     @property
     def idx_in_solver(self):
         return self._idx_in_solver
+
+    @property
+    def variants_owner(self):
+        """The heterogeneous entity (`MochiSoftVariantsEntity`) this body is a variant of, or None."""
+        return self._variants_owner
+
+    @property
+    def variant_idx(self):
+        """The index of this body among the variants of its heterogeneous entity, or None."""
+        return self._variant_idx
 
     @property
     def is_shell(self):

@@ -797,6 +797,10 @@ def func_soft_assemble_elements(
             i_e = soft_info.elems_entity_idx[i_el]
             if soft_state.entities_is_asleep[i_e, i_b]:
                 continue
+        if qd.static(mochi_config.has_soft_variants):
+            # An absent variant has every vertex fixed: its rows are identities, which need no element.
+            if not soft_info.entities_is_active[soft_info.elems_entity_idx[i_el], i_b]:
+                continue
         i_e = soft_info.elems_entity_idx[i_el]
         v = soft_info.elems_v[i_el]
         h = mochi_state.dt_stage[i_b]
@@ -1086,9 +1090,12 @@ def func_soft_broadphase(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
     errno: qd.Tensor,
 ):
-    """Enumerate the (deformable entity, collider geom) pairs whose conservative bounds overlap within the step."""
+    """Enumerate the (deformable entity, collider geom) pairs whose conservative bounds overlap within the step. An
+    absent variant of a heterogeneous entity pairs with nothing.
+    """
     n_entities = soft_state.entities_step_aabb_min.shape[0]
     n_geoms = dyn_state.geoms.pos.shape[0]
     _B = soft_state.verts_pos.shape[1]
@@ -1108,6 +1115,9 @@ def func_soft_broadphase(
             continue
         if soft_info.entities_sample_end[i_e] <= soft_info.entities_sample_start[i_e]:
             continue
+        if qd.static(mochi_config.has_soft_variants):  # noqa: SIM102
+            if not soft_info.entities_is_active[i_e, i_b]:
+                continue
         if mochi_info.geoms.collider_type[i_gb] == COLLIDER_TYPE.NONE:
             continue
         i_lb = dyn_info.geoms.link_idx[i_gb]
@@ -1145,6 +1155,7 @@ def kernel_soft_broadphase(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
     errno: qd.Tensor,
 ):
     func_soft_broadphase(
@@ -1160,6 +1171,7 @@ def kernel_soft_broadphase(
         soft_info,
         soft_state,
         rigid_config,
+        mochi_config,
         errno,
     )
 
@@ -1922,9 +1934,11 @@ def func_soft_condense_dense(
     soft_state: MochiSoftState,
     island_state: MochiIslandState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
 ):
     """Add the deformable blocks to the dense Hessian of every running environment and impose the Dirichlet rows and
-    columns (zero off-diagonal, unit diagonal) of the fixed vertices.
+    columns (zero off-diagonal, unit diagonal) of the fixed vertices, and of the twist degrees of freedom of the absent
+    variants of a heterogeneous rod, which assemble nothing.
     """
     n_verts = soft_state.verts_pos.shape[0]
     n_dofs = mochi_state.res.shape[0]
@@ -2114,6 +2128,23 @@ def func_soft_condense_dense(
                 mochi_state.H_dense[i_b, j_d, i_d] = 0.0
             mochi_state.H_dense[i_b, i_d, i_d] = 1.0
 
+    if qd.static(mochi_config.has_soft_variants):
+        n_rod_elems = soft_info.rod_elems_entity_idx.shape[0]
+        qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+        for i_r, i_slot in (
+            qd.ndrange(n_rod_elems, n_envs[None]) if qd.static(not per_env) else qd.ndrange(n_rod_elems, 1)
+        ):
+            i_b = envs[i_slot] if qd.static(not per_env) else i_b_env
+            if not (mochi_state.is_active[i_b] and island_state.uses_dense[i_b]) or soft_info.rod_elems_L[i_r] <= 0.0:
+                continue
+            if soft_info.entities_is_active[soft_info.rod_elems_entity_idx[i_r], i_b]:
+                continue
+            i_d = func_rod_twist_dof(i_r, soft_info)
+            for j_d in range(n_dofs):
+                mochi_state.H_dense[i_b, i_d, j_d] = 0.0
+                mochi_state.H_dense[i_b, j_d, i_d] = 0.0
+            mochi_state.H_dense[i_b, i_d, i_d] = 1.0
+
 
 @qd.kernel
 def kernel_soft_condense_dense(
@@ -2124,6 +2155,7 @@ def kernel_soft_condense_dense(
     soft_state: MochiSoftState,
     island_state: MochiIslandState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
 ):
     func_soft_condense_dense(
         0,
@@ -2137,6 +2169,7 @@ def kernel_soft_condense_dense(
         soft_state,
         island_state,
         rigid_config,
+        mochi_config,
     )
 
 
@@ -2276,6 +2309,145 @@ def kernel_soft_set_vertices_target(
 
 
 @qd.kernel
+def kernel_soft_fix_absent_variants(soft_info: MochiSoftInfo, soft_state: MochiSoftState, rigid_config: qd.template()):
+    """Fix every vertex of the variants of a heterogeneous entity at its rest position in the environments where the
+    variant is absent (MochiSoftInfo.entities_is_active). Its rows of the Newton system are then identities, and the
+    setters of the heterogeneous entity never write them, so it stays there.
+    """
+    n_verts = soft_state.verts_pos.shape[0]
+    _B = soft_state.verts_pos.shape[1]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_v, i_b in qd.ndrange(n_verts, _B):
+        if not soft_info.entities_is_active[soft_info.verts_entity_idx[i_v], i_b]:
+            soft_state.verts_is_fixed[i_v, i_b] = True
+            soft_state.verts_target[i_v, i_b] = soft_info.verts_rest[i_v]
+
+
+@qd.kernel
+def kernel_soft_get_variants_field(
+    envs_idx: qd.types.ndarray(),
+    envs_v_start: qd.types.ndarray(),
+    envs_n_verts: qd.types.ndarray(),
+    out: qd.types.ndarray(),
+    field: qd.Tensor,
+    rigid_config: qd.template(),
+):
+    """A vertex field of the variant of a heterogeneous entity that every environment of `envs_idx` holds, whose first
+    vertex and vertex count per environment are `envs_v_start` and `envs_n_verts`; zero past its vertices.
+    """
+    n_verts = out.shape[1]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_v_, i_b_ in qd.ndrange(n_verts, envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        value = qd.Vector.zero(gs.qd_float, 3)
+        if i_v_ < envs_n_verts[i_b]:
+            value = field[envs_v_start[i_b] + i_v_, i_b]
+        for k in qd.static(range(3)):
+            out[i_b_, i_v_, k] = value[k]
+
+
+@qd.kernel
+def kernel_soft_set_variants_positions(
+    envs_idx: qd.types.ndarray(),
+    envs_v_start: qd.types.ndarray(),
+    envs_n_verts: qd.types.ndarray(),
+    pos: qd.types.ndarray(),
+    soft_state: MochiSoftState,
+    rigid_config: qd.template(),
+):
+    """Set the vertex positions of the variant every environment of `envs_idx` holds, as
+    `kernel_soft_set_vertices_positions` does, from rows laid out as in `kernel_soft_get_variants_field`.
+    """
+    n_verts = pos.shape[1]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_v_, i_b_ in qd.ndrange(n_verts, envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        if i_v_ < envs_n_verts[i_b]:
+            i_v = envs_v_start[i_b] + i_v_
+            value = qd.Vector([pos[i_b_, i_v_, 0], pos[i_b_, i_v_, 1], pos[i_b_, i_v_, 2]], dt=gs.qd_float)
+            soft_state.verts_pos[i_v, i_b] = value
+            soft_state.verts_target[i_v, i_b] = value
+            soft_state.verts_vel[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            for j in qd.static(range(N_HISTORY)):
+                soft_state.verts_pos_prev[j, i_v, i_b] = value
+                soft_state.verts_vel_prev[j, i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.kernel
+def kernel_soft_set_variants_velocities(
+    envs_idx: qd.types.ndarray(),
+    envs_v_start: qd.types.ndarray(),
+    envs_n_verts: qd.types.ndarray(),
+    vel: qd.types.ndarray(),
+    soft_state: MochiSoftState,
+    rigid_config: qd.template(),
+):
+    """Set the vertex velocities of the variant every environment of `envs_idx` holds (see
+    `kernel_soft_set_variants_positions`).
+    """
+    n_verts = vel.shape[1]
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_v_, i_b_ in qd.ndrange(n_verts, envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        if i_v_ < envs_n_verts[i_b]:
+            i_v = envs_v_start[i_b] + i_v_
+            value = qd.Vector([vel[i_b_, i_v_, 0], vel[i_b_, i_v_, 1], vel[i_b_, i_v_, 2]], dt=gs.qd_float)
+            soft_state.verts_vel[i_v, i_b] = value
+            for j in qd.static(range(N_HISTORY)):
+                soft_state.verts_vel_prev[j, i_v, i_b] = value
+
+
+@qd.kernel
+def kernel_soft_set_variants_vertices_fixed(
+    envs_idx: qd.types.ndarray(),
+    envs_v_start: qd.types.ndarray(),
+    verts_idx: qd.types.ndarray(),
+    is_fixed: qd.i32,
+    soft_state: MochiSoftState,
+    rigid_config: qd.template(),
+):
+    """`kernel_soft_set_vertices_fixed` for the variant every environment of `envs_idx` holds: the indices of a row
+    are local to that variant, whose first vertex per environment is `envs_v_start`.
+    """
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
+        i_v_local = verts_idx[i_b_, i_v_]
+        if i_v_local >= 0:
+            i_b = envs_idx[i_b_]
+            i_v = i_v_local + envs_v_start[i_b]
+            soft_state.verts_is_fixed[i_v, i_b] = is_fixed != 0
+            if is_fixed != 0:
+                soft_state.verts_target[i_v, i_b] = soft_state.verts_pos[i_v, i_b]
+                soft_state.verts_vel[i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+                for j in qd.static(range(N_HISTORY)):
+                    soft_state.verts_vel_prev[j, i_v, i_b] = qd.Vector.zero(gs.qd_float, 3)
+
+
+@qd.kernel
+def kernel_soft_set_variants_vertices_target(
+    envs_idx: qd.types.ndarray(),
+    envs_v_start: qd.types.ndarray(),
+    verts_idx: qd.types.ndarray(),
+    pos: qd.types.ndarray(),
+    soft_state: MochiSoftState,
+    rigid_config: qd.template(),
+):
+    """`kernel_soft_set_vertices_target` for the variant every environment of `envs_idx` holds (see
+    `kernel_soft_set_variants_vertices_fixed`).
+    """
+    qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_v_, i_b_ in qd.ndrange(verts_idx.shape[1], envs_idx.shape[0]):
+        i_v_local = verts_idx[i_b_, i_v_]
+        if i_v_local >= 0:
+            i_b = envs_idx[i_b_]
+            i_v = i_v_local + envs_v_start[i_b]
+            soft_state.verts_is_fixed[i_v, i_b] = True
+            soft_state.verts_target[i_v, i_b] = qd.Vector(
+                [pos[i_b_, i_v_, 0], pos[i_b_, i_v_, 1], pos[i_b_, i_v_, 2]], dt=gs.qd_float
+            )
+
+
+@qd.kernel
 def kernel_soft_set_entity_contact_params(
     i_e: qd.i32,
     pc_hash_cell: float,
@@ -2303,9 +2475,11 @@ def kernel_rod_get_state_render(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    has_soft_variants: qd.template(),
 ):
     """Tube vertices around the rod centerlines: node position plus the cross-section offset (radius times cosine and
-    sine of the ring angle) along the material axis of the segment and its binormal.
+    sine of the ring angle) along the material axis of the segment and its binormal. The tube of an absent variant of a
+    heterogeneous rod collapses onto its first rest vertex, which draws nothing.
     """
     n_vverts = rod_vverts_node.shape[0]
     _B = soft_state.verts_pos.shape[1]
@@ -2317,6 +2491,10 @@ def kernel_rod_get_state_render(
         axis = soft_state.rod_elems_axis[i_r, i_b]
         tangent = func_rod_tangent(i_r, i_b, soft_state.verts_pos, soft_info)
         pos = soft_state.verts_pos[i_v, i_b] + offset[0] * axis + offset[1] * tangent.cross(axis)
+        if qd.static(has_soft_variants):
+            i_e = soft_info.verts_entity_idx[i_v]
+            if not soft_info.entities_is_active[i_e, i_b]:
+                pos = soft_info.verts_rest[soft_info.entities_vert_start[i_e]]
         for k in qd.static(range(3)):
             vverts_render[rod_vverts_vvert[i_vv], i_b][k] = qd.cast(pos[k] + envs_offset[i_b, k], qd.f32)
 
@@ -2350,21 +2528,31 @@ def kernel_soft_get_state_render(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    has_soft_variants: qd.template(),
 ):
+    """Render vertices of the deformable surfaces. Those of an absent variant of a heterogeneous entity collapse onto
+    its first rest vertex, which draws nothing.
+    """
     n_vverts = vverts_vert_idx.shape[0]
     _B = soft_state.verts_pos.shape[1]
     qd.loop_config(serialize=qd.static(rigid_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_vv, i_b in qd.ndrange(n_vverts, _B):
         pos = qd.Vector.zero(gs.qd_float, 3)
         i_el = vverts_elem[i_vv]
+        i_v = vverts_vert_idx[i_vv]
         if i_el >= 0:
             # An embedded render vertex follows the barycentric combination of its element's nodes.
             v = soft_info.elems_v[i_el]
             bary = vverts_bary[i_vv]
             for k in qd.static(range(4)):
                 pos += bary[k] * soft_state.verts_pos[v[k], i_b]
+            i_v = v[0]
         else:
-            pos = soft_state.verts_pos[vverts_vert_idx[i_vv], i_b]
+            pos = soft_state.verts_pos[i_v, i_b]
+        if qd.static(has_soft_variants):
+            i_e = soft_info.verts_entity_idx[i_v]
+            if not soft_info.entities_is_active[i_e, i_b]:
+                pos = soft_info.verts_rest[soft_info.entities_vert_start[i_e]]
         for k in qd.static(range(3)):
             vverts_render[i_vv, i_b][k] = qd.cast(pos[k] + envs_offset[i_b, k], qd.f32)
 
@@ -2505,9 +2693,12 @@ def func_pc_hash_build(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
     skip_ls_done,
 ):
-    """Insert the collider spheres of the shell and rod vertices (padded by their contact range) in the hash."""
+    """Insert the collider spheres of the shell and rod vertices (padded by their contact range) in the hash. The
+    vertices of an absent variant of a heterogeneous entity are left out, so no query meets them.
+    """
     n_bins = soft_state.pc_hash_heads.shape[0]
     n_verts = soft_state.verts_pos.shape[0]
     inv_cell = 1.0 / soft_info.pc_hash_cell[None]
@@ -2521,8 +2712,12 @@ def func_pc_hash_build(
         i_b = envs[i_slot] if qd.static(not per_env) else i_b_env
         if func_is_env_active(i_b, mochi_state, skip_ls_done):
             i_e = soft_info.verts_entity_idx[i_v]
+            is_present = True
+            if qd.static(mochi_config.has_soft_variants):
+                is_present = soft_info.entities_is_active[i_e, i_b]
             if (
-                soft_info.entities_collider_type[i_e] == COLLIDER_TYPE.POINT_CLOUD
+                is_present
+                and soft_info.entities_collider_type[i_e] == COLLIDER_TYPE.POINT_CLOUD
                 and soft_info.verts_collider_weight[i_v] > 0.0
             ):
                 pad = soft_info.entities_collider_radius[i_e] + soft_info.entities_penalty_threshold[i_e]
@@ -2575,7 +2770,12 @@ def func_tet_tree_refit(
                 if soft_info.tet_tree_is_leaf[i_node] != 0:
                     first = soft_info.tet_tree_first[i_node]
                     for j in range(first, first + soft_info.tet_tree_count[i_node]):
-                        tet_min, tet_max = func_tet_aabb(soft_info.tet_tree_elems[j], i_b, soft_info, soft_state)
+                        i_el = soft_info.tet_tree_elems[j]
+                        if qd.static(mochi_config.has_soft_variants):  # noqa: SIM102
+                            # The tetrahedra of an absent variant bound nothing, so a query skips their subtree
+                            if not soft_info.entities_is_active[soft_info.elems_entity_idx[i_el], i_b]:
+                                continue
+                        tet_min, tet_max = func_tet_aabb(i_el, i_b, soft_info, soft_state)
                         aabb_min = qd.min(aabb_min, tet_min)
                         aabb_max = qd.max(aabb_max, tet_max)
                 else:
@@ -2695,6 +2895,10 @@ def func_soft_collider_eval(
             continue
         if i_q < n_rigid and not mochi_info.links.is_dynamic[mochi_info.samples.link_idx[i_q]]:
             continue
+        # Nor does a sample of an absent variant of a heterogeneous entity
+        if qd.static(mochi_config.has_soft_variants):  # noqa: SIM102
+            if i_q >= n_rigid and not soft_info.entities_is_active[soft_info.samples_entity_idx[i_q - n_rigid], i_b]:
+                continue
         kind_a, i_la, e_a, i_sample, pos, pos_start, normal_a0, w, k_a, falloff_a, mu_a, c_visc_a, c_ndamp_a = (
             func_query_point(i_q, i_b, dyn_state, mochi_info, mochi_state, soft_info, soft_state, EPS)
         )
@@ -2726,6 +2930,8 @@ def func_soft_collider_eval(
                             is_enabled = soft_info.entities_links_pair_enabled[e_b, i_la]
                         else:
                             is_enabled = (e_a != e_b) and soft_info.entities_pair_enabled[e_a, e_b]
+                        if qd.static(mochi_config.has_soft_variants):
+                            is_enabled = is_enabled and soft_info.entities_is_active[e_b, i_b]
                         if not is_enabled:
                             continue
                         # the sample must lie in the bounds of the tetrahedron before the inclusion test
@@ -3111,6 +3317,10 @@ def func_shell_assemble(
             # A sleeping body keeps its pose: its zero residual needs no element (see sleep.py).
             if soft_state.entities_is_asleep[i_e, i_b]:
                 continue
+        if qd.static(mochi_config.has_soft_variants):  # noqa: SIM102
+            # An absent variant has every vertex fixed: its rows are identities, which need no element.
+            if not soft_info.entities_is_active[i_e, i_b]:
+                continue
         nodes = func_shell_nodes(i_t, soft_info)
         is_missing = func_shell_missing(i_t, soft_info)
         h = mochi_state.dt_stage[i_b]
@@ -3440,6 +3650,7 @@ def func_rod_assemble(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
     assem_obj: qd.template(),
     assem_res: qd.template(),
     assem_dres,
@@ -3447,6 +3658,10 @@ def func_rod_assemble(
 ):
     """Stretching, lumped inertia, gravity and damping of every rod segment (with the twist inertia on its twist
     degree of freedom), and bending and twisting of every interior stencil.
+
+    An absent variant of a heterogeneous rod assembles nothing: its vertices are fixed, and its twist degrees of
+    freedom keep a zero residual, which the linear solvers turn into a zero increment (identity rows, see
+    func_soft_condense_dense and func_rod_band_factor).
     """
     n_elems = soft_state.rod_elems_H.shape[0]
     n_stencils = soft_state.rod_stencils_H.shape[0]
@@ -3462,6 +3677,9 @@ def func_rod_assemble(
         if L <= 0.0:
             continue
         i_e = soft_info.rod_elems_entity_idx[i_r]
+        if qd.static(mochi_config.has_soft_variants):  # noqa: SIM102
+            if not soft_info.entities_is_active[i_e, i_b]:
+                continue
         v = soft_info.rod_elems_v[i_r]
         h = mochi_state.dt_stage[i_b]
         f = soft_info.entities_stiffness_damping[i_e] / h
@@ -3550,6 +3768,9 @@ def func_rod_assemble(
         v = soft_info.rod_stencils_v[i_s]
         e = soft_info.rod_stencils_e[i_s]
         i_e = soft_info.rod_elems_entity_idx[e[0]]
+        if qd.static(mochi_config.has_soft_variants):  # noqa: SIM102
+            if not soft_info.entities_is_active[i_e, i_b]:
+                continue
         h = mochi_state.dt_stage[i_b]
         f = soft_info.entities_stiffness_damping[i_e] / h
         ref = soft_info.rod_stencils_ref[i_s]
@@ -3602,6 +3823,7 @@ def kernel_rod_assemble(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
     assem_obj: qd.template(),
     assem_res: qd.template(),
     assem_dres: qd.i32,
@@ -3617,6 +3839,7 @@ def kernel_rod_assemble(
         soft_info,
         soft_state,
         rigid_config,
+        mochi_config,
         assem_obj,
         assem_res,
         assem_dres,
@@ -3873,6 +4096,10 @@ def func_pc_collider_eval(
         # A deformable sample whose entity has no sphere collider to hit never queries.
         if soft_info.entities_queries_spheres[soft_info.samples_entity_idx[i_q_soft]] == 0:
             continue
+        # Nor does one of an absent variant; the spheres of an absent variant are not in the hash (func_pc_hash_build).
+        if qd.static(mochi_config.has_soft_variants):  # noqa: SIM102
+            if not soft_info.entities_is_active[soft_info.samples_entity_idx[i_q_soft], i_b]:
+                continue
         i_q = n_rigid + i_q_soft
         kind_a, i_la, e_a, i_sample, pos, pos_start, normal_a0, w, k_a, falloff_a, mu_a, c_visc_a, c_ndamp_a = (
             func_query_point(i_q, i_b, dyn_state, mochi_info, mochi_state, soft_info, soft_state, EPS)
@@ -4082,6 +4309,7 @@ def kernel_pc_hash_build(
     soft_info: MochiSoftInfo,
     soft_state: MochiSoftState,
     rigid_config: qd.template(),
+    mochi_config: qd.template(),
     skip_ls_done: qd.i32,
 ):
     func_pc_hash_build(
@@ -4093,5 +4321,6 @@ def kernel_pc_hash_build(
         soft_info,
         soft_state,
         rigid_config,
+        mochi_config,
         skip_ls_done,
     )

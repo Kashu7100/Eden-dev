@@ -909,6 +909,9 @@ build, so a TaskMod's later edit is checked as well.
 
 Worked scripts: `examples/recipes/heterogeneous/heterogeneous_sim.py` and `heterogeneous_articulated.py`.
 
+A group whose `material` is a Mochi deformable material builds a soft body with a different mesh per env instead;
+see [Heterogeneous soft bodies](#heterogeneous-soft-bodies) under Mochi entities.
+
 ## Deformable entities
 
 Deformable bodies are vertex- or particle-based. They have no DOFs, links or joint control, and the DOF and
@@ -1069,6 +1072,54 @@ consequences shape a manipulation scene:
 
 Worked scripts for every feature above are in `examples/recipes/mochi/`; the Mochi tasks are on
 [Mochi tasks](../tasks/mochi.md).
+
+### Heterogeneous soft bodies
+
+A `GroupedEntityOptions` whose `material` is `MochiElasticMaterialOptions`, `MochiShellMaterialOptions` or
+`MochiRodMaterialOptions` builds one `MochiSoftEntity` that holds a different mesh per env: cloths of several cuts,
+or solids or rods of several shapes. The variants go to the envs as for a rigid group (contiguous blocks, read back
+with `env_variant_idx`, fixed at build).
+
+```python
+from eden.options.entities import EntityOptions, GroupedEntityOptions
+from eden.options.materials import MochiShellMaterialOptions
+from eden.utils.procedural_meshes import grid_sheet_file
+
+cloth = GroupedEntityOptions(
+    material=MochiShellMaterialOptions(E=2e4, thickness=1e-3),  # every variant's
+    default_root_pos=(0.0, 0.0, 0.3),
+    grouped_entities=[
+        EntityOptions(file=grid_sheet_file((0.4, 0.4), (12, 12))),
+        EntityOptions(file=grid_sheet_file((0.5, 0.3), (15, 9)), default_root_pos=(0.0, 0.05, 0.0)),
+    ],
+)
+```
+
+Every variant is built from the group's one material, so a variant may hold no value of its own for a material,
+geom or DOF field (refused at validation); its `default_root_pos` / `default_root_quat` compose onto the group's and
+are baked into its rest shape. A solid or shell variant is a `Box`, `Sphere`, `Cylinder` or mesh, a rod variant a
+`RodOptions`, and a rod or tetrahedral-mesh variant restates the group's material, which its own options require.
+
+Per-vertex arrays span `n_vertices`, the vertex count of the largest variant. An env's own vertices come first:
+`get_vertex_positions`, `get_vertex_velocities` and `get_vertex_contact_forces` read zero in the rows past them,
+`vertices_mask` (`(B, n_vertices)`, bool) marks the real rows, `get_pos` / `get_vel` average the real rows only,
+and `get_mass` is per env. The setters take the same padded shapes, or a `(3,)` / `(B, 3)` offset or velocity, and
+ignore the padding. Vertex indices for `set_vertices_fixed` / `set_vertices_target` are local to each env's own
+variant; one past its vertices raises and names the env, its variant and that variant's vertex count. What belongs
+to one mesh (`init_positions`, `elems`, `n_elements`) raises: read it per variant on the engine entity,
+`entity.entity.variants[k]` (a `MochiSoftVariantsEntity` owns one `MochiSoftEntity` per variant). `attach_to` /
+`attachments_dict`, `attach_to_link` and `set_rest_positions` raise on a heterogeneous body; `set_visual_mesh` and
+`set_contact_skin` raise too and are called per variant from the pre-build hook instead,
+`entity.entity.variants[k].set_visual_mesh(get_asset_path(file))`. The terms of `eden.tasks.mochi` that read
+vertex arrays refuse a heterogeneous body at build.
+
+Worked script: `examples/recipes/mochi/cloth_heterogeneous.py`.
+
+The solver's topology tables have no env axis, so every variant is a body of the solver in every env. In an env
+that holds another variant it stays fixed at its rest pose, out of contact, out of the element assembly, and is not
+drawn. Memory and the extents of the per-step loops therefore grow with the summed size of the variants times
+`num_envs`. The same sum sets the size of the Newton system: `MochiOptions.dense_matrix_max_dofs` and the default
+`n_pcg_iterations` (the system size, capped at 500) count the degrees of freedom of every variant.
 
 ## Terrain
 

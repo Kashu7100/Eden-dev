@@ -125,6 +125,9 @@ class MochiConfig(Config):
     has_pc_colliders: bool
     # any open rod present (the banded rod preconditioner and its contact scatter are compiled only then)
     has_rod_band: bool
+    # some deformable body is a variant of a heterogeneous entity, absent from the environments that hold another
+    # variant (the per-environment activity checks are compiled only then, see MochiSoftInfo.entities_is_active)
+    has_soft_variants: bool
     has_soft_colliders: bool
     # levels of the bounding-box hierarchy of the collider tetrahedra (the refit runs one task per level)
     tet_tree_levels: int
@@ -821,6 +824,11 @@ class MochiSoftInfo:
     entities_vert_end: qd.Tensor
     entities_sample_start: qd.Tensor
     entities_sample_end: qd.Tensor
+    # Whether a deformable entity exists in an environment, per (entity, environment). Every entity exists everywhere
+    # but the variants of a heterogeneous entity, each of which exists in the environments it was assigned to at build.
+    # An absent entity keeps its vertices fixed at their rest positions and takes part in no contact and no element
+    # assembly. Allocated only when some entity is such a variant (MochiConfig.has_soft_variants).
+    entities_is_active: qd.Tensor
     # Whether the entity acts as a collider, and its rest-shape signed distance grid: offset into the flattened voxel
     # array, resolution, position of the first voxel and cell size per axis (rest frame == world frame at build).
     entities_collider_type: qd.Tensor
@@ -947,6 +955,7 @@ def get_mochi_soft_info(solver):
         entities_vert_end=V(dtype=gs.qd_int, shape=(n_se_,)),
         entities_sample_start=V(dtype=gs.qd_int, shape=(n_se_,)),
         entities_sample_end=V(dtype=gs.qd_int, shape=(n_se_,)),
+        entities_is_active=V(dtype=gs.qd_bool, shape=(n_se_, solver.n_envs_) if solver.has_soft_variants else (1, 1)),
         entities_collider_type=V(dtype=gs.qd_int, shape=(n_se_,)),
         entities_sdf_start=V(dtype=gs.qd_int, shape=(n_se_,)),
         entities_sdf_res=V(dtype=gs.qd_ivec3, shape=(n_se_,)),

@@ -164,6 +164,7 @@ def test_attachment_hessian_finite_difference(show_viewer):
         solver.soft_state,
         solver.island_state,
         solver.rigid_config,
+        solver.mochi_config,
     )
     H = qd_to_numpy(solver.mochi_state.H_dense)[0].copy()
     n_rigid_dofs = solver.n_dofs

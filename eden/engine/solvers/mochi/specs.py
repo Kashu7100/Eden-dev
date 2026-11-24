@@ -19,15 +19,16 @@ from eden.engine.solvers.mochi import materials as mochi_materials
 
 
 def _refuse_morph_sequence(cls: type, data: Any) -> Any:
-    """Refuse a sequence of morphs, a heterogeneous entity, which the MochiSolver does not simulate.
+    """Refuse a sequence of morphs, a heterogeneous rigid entity, which the MochiSolver does not simulate.
 
     Ahead of Genesis' own check, whose message names the class as ``gs.entities.<name>``, which a Mochi spec is not.
     """
     morph = data.get("morph") if isinstance(data, dict) else None
     if isinstance(morph, (tuple, list)):
         gs.raise_exception(
-            f"The MochiSolver simulates no heterogeneous entity: pass {cls.__name__} one morph, not a sequence of "
-            f"{len(morph)}."
+            f"The MochiSolver simulates no heterogeneous rigid entity: pass {cls.__name__} one morph, not a sequence "
+            f"of {len(morph)}. Only a deformable body (`MochiSoftSpec`, an Elastic, Shell or Rod material) takes one "
+            "morph per variant; add one rigid entity per shape instead."
         )
     return data
 
@@ -36,7 +37,7 @@ class MochiRigidSpec(gs.entities.Rigid):
     """Spec of a rigid or articulated body simulated by the MochiSolver.
 
     A ``gs.entities.Rigid`` whose material is a ``MochiRigid``, of one morph: the MochiSolver simulates no
-    heterogeneous entity. Contact is a property of the material (``MochiRigid``), not of the geoms, so no option is set
+    heterogeneous rigid entity. Contact is a property of the material (``MochiRigid``), not of the geoms, so no option is set
     on a selection of links or geoms; ``MochiEntity.set_contact_params`` changes it per link once the scene is built.
 
     Only a scene :func:`~eden.engine.solvers.mochi.hosting.install_mochi_solver` was called on knows it: elsewhere it is
@@ -76,6 +77,10 @@ class MochiRigidSpec(gs.entities.Rigid):
 class MochiSoftSpec(gs.entities.Spec["MochiSoftEntity"]):
     """Spec of a deformable body simulated by the MochiSolver: a tetrahedral solid, a thin shell or a rod.
 
+    A sequence of morphs makes the body heterogeneous: each morph is a variant, and each parallel environment holds
+    one of them (see ``MochiSoftVariantsEntity``). Every variant takes the one material of the spec, so all of them are
+    solids, shells or rods alike.
+
     Parameters
     ----------
     material : Elastic | Shell | Rod
@@ -83,12 +88,9 @@ class MochiSoftSpec(gs.entities.Spec["MochiSoftEntity"]):
         (``eden.engine.solvers.mochi.morphs``), the other two a ``Box``, ``Sphere``, ``Cylinder`` or ``Mesh``.
     """
 
-    material: mochi_materials.Elastic | mochi_materials.Shell | mochi_materials.Rod
+    _admits_variants = True
 
-    @model_validator(mode="before")
-    @classmethod
-    def _check_one_morph(cls, data: Any) -> Any:
-        return _refuse_morph_sequence(cls, data)
+    material: mochi_materials.Elastic | mochi_materials.Shell | mochi_materials.Rod
 
     # Genesis checks that a material belongs to the solver of the spec through a table of its own solvers, which holds
     # none of the Mochi materials and would refuse them all. The field above admits only the MochiSolver's.
@@ -118,5 +120,6 @@ def mochi_spec(
         # `MochiRigidSpec` refuses it with the reason
         fields["visualize_contact"] = visualize_contact
     if isinstance(morph, Iterable) and not isinstance(morph, Morph):
-        fields["morph"] = tuple(morph)  # refused by the spec, with the reason
+        # A `MochiSoftSpec` takes one morph per variant, a `MochiRigidSpec` refuses them with the reason
+        fields["morph"] = tuple(morph)
     return spec_cls(**{field: value for field, value in fields.items() if value is not None})

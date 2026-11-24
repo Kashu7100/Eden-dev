@@ -209,6 +209,14 @@ class MochiSoftEntity(Entity):
     :meth:`set_rest_positions` (it raises otherwise). :meth:`set_contact_skin` cannot be combined with
     :meth:`set_rest_positions` in either order (both raise). :meth:`attach_to_link` only records indices
     and can go anywhere in the hook.
+
+    Built from ``GroupedEntityOptions`` with a Mochi deformable material, the body is heterogeneous: each
+    env holds one variant mesh (:attr:`env_variant_idx`), and the engine entity is a
+    ``MochiSoftVariantsEntity``. Every per-vertex array then spans :attr:`n_vertices`, the vertex count of
+    the largest variant, with an env's own vertices first and padding after: reads pad with zeros
+    (:attr:`vertices_mask` marks the real rows), writes ignore the padding, and vertex indices are local to
+    each env's own variant. ``get_pos`` / ``get_vel`` average the real rows, ``get_mass`` is per env, and the
+    pre-build calls above, which place one mesh, raise.
     """
 
     _entity: GsMochiSoftEntity
@@ -228,16 +236,42 @@ class MochiSoftEntity(Entity):
 
     def get_pos(self, envs_idx=None):
         """Mean vertex position (unweighted centroid), shape ``(B, 3)``."""
-        pos = self.get_vertex_positions()
-        centroid = pos.mean(dim=1)
+        centroid = self._vertex_mean(self.get_vertex_positions())
         return centroid if envs_idx is None else centroid[envs_idx]
 
     def get_vel(self, envs_idx=None, *, frame: Literal["world", "body"] = "world"):
         """Mean vertex velocity, shape ``(B, 3)``. Only the world frame is defined."""
         if frame != "world":
             raise ValueError(f"MochiSoftEntity only supports frame='world', got '{frame}'.")
-        vel = self.get_vertex_velocities().mean(dim=1)
+        vel = self._vertex_mean(self.get_vertex_velocities())
         return vel if envs_idx is None else vel[envs_idx]
+
+    def _vertex_mean(self, values: torch.Tensor) -> torch.Tensor:
+        """Mean over the vertex axis of ``(B, n_vertices, 3)`` values, over each env's own vertices when heterogeneous."""
+        if not self.has_variant_meshes:
+            return values.mean(dim=1)
+        mask = self.vertices_mask.unsqueeze(-1)
+        return (values * mask).sum(dim=1) / mask.sum(dim=1)
+
+    @property
+    def has_variant_meshes(self) -> bool:
+        """Whether each env holds one of several variant meshes.
+
+        A ``GroupedEntityOptions`` of one variant builds an ordinary one-mesh body, which this reports as False.
+        """
+        return self.is_heterogeneous and self.num_variants > 1
+
+    @property
+    def vertices_mask(self) -> torch.Tensor:
+        """Which rows of the vertex axis are vertices of each env's own body, shape ``(B, n_vertices)``.
+
+        All true for a homogeneous body; for a heterogeneous one, the rows past the vertices of an env's own
+        variant are padding.
+        """
+        if not self.has_variant_meshes:
+            return torch.ones((self._env.num_envs, self.n_vertices), dtype=torch.bool, device=self.device)
+        mask = self._entity.vertices_mask
+        return mask.unsqueeze(0) if mask.ndim == 1 else mask
 
     def get_quat(self, envs_idx=None):
         """Identity quaternion (wxyz) for every env, shape ``(B, 4)``: a soft body has no rigid orientation."""
@@ -291,7 +325,14 @@ class MochiSoftEntity(Entity):
         )
 
     def get_mass(self):
-        """Total mass (kg) from the material density and the rest geometry."""
+        """Total mass (kg) from the material density and the rest geometry: a 0-dim tensor, or ``(num_envs,)``,
+        each env's own variant, for a heterogeneous body.
+        """
+        if self.has_variant_meshes:
+            masses = torch.tensor(
+                [float(body.mass) for body in self._entity.variants], dtype=gs.tc_float, device=self.device
+            )
+            return masses[self.env_variant_idx]
         return torch.as_tensor(float(self._entity.mass), dtype=gs.tc_float, device=self.device)
 
     def set_mass(self, mass):
@@ -302,7 +343,7 @@ class MochiSoftEntity(Entity):
     # ---- vertex state ---------------------------------------------------------------------------
 
     def get_vertex_positions(self, envs_idx=None) -> torch.Tensor:
-        """World vertex positions, shape ``(B, n_vertices, 3)``."""
+        """World vertex positions, shape ``(B, n_vertices, 3)`` (padded with zeros when heterogeneous)."""
         return self._with_env_axis(self._entity.get_vertices_position(envs_idx))
 
     def get_vertex_velocities(self, envs_idx=None) -> torch.Tensor:
@@ -324,7 +365,11 @@ class MochiSoftEntity(Entity):
         self._entity.set_velocity(vel, envs_idx=envs_idx)
 
     def set_vertices_fixed(self, verts_idx_local, is_fixed: bool = True, envs_idx=None) -> None:
-        """Pin (or release) vertices at their current positions (a Dirichlet condition)."""
+        """Pin (or release) vertices at their current positions (a Dirichlet condition).
+
+        ``verts_idx_local`` is one set for every env, ``(n,)``, or one per env, ``(B, n)`` padded with -1; on a
+        heterogeneous body the indices are local to each env's own variant, and one past its vertices raises.
+        """
         self._entity.set_vertices_fixed(verts_idx_local, is_fixed=is_fixed, envs_idx=envs_idx)
 
     def set_vertices_target(self, verts_idx_local, pos, envs_idx=None) -> None:
@@ -379,6 +424,7 @@ class MochiSoftEntity(Entity):
         zero), so the rest geometry is placed there before the build, and :meth:`post_build` then carries the
         whole body to wherever the parent's default joint positions put the link.
         """
+        self._refuse_heterogeneous("attach_to")
         if not isinstance(self.material, en.materials.MochiElasticMaterialOptions):
             raise NotImplementedError(
                 f"MochiSoftEntity '{self.name}' is a {type(self.material).__name__} body; attachments_dict mounts "
@@ -470,6 +516,7 @@ class MochiSoftEntity(Entity):
             Damping on the tie violation rate. Defaults to 0.0.
         """
         self._require_added("attach_to_link")
+        self._refuse_heterogeneous("attach_to_link")
         self._entity.attach_to_link(entity.get_link(link_name), verts_idx, stiffness=stiffness, damping=damping)
 
     @assert_unbuilt
@@ -490,6 +537,7 @@ class MochiSoftEntity(Entity):
             World rest positions, shape ``(n_vertices, 3)``.
         """
         self._require_added("set_rest_positions")
+        self._refuse_heterogeneous("set_rest_positions")
         if self._has_contact_skin:
             raise RuntimeError(
                 f"MochiSoftEntity '{self.name}': set_rest_positions() cannot follow set_contact_skin(). The skin "
@@ -530,6 +578,7 @@ class MochiSoftEntity(Entity):
             Uniform scale of the render mesh. Defaults to 1.0.
         """
         self._require_added("set_visual_mesh")
+        self._refuse_heterogeneous("set_visual_mesh")
         if self._rest_positions_moved:
             raise RuntimeError(
                 f"MochiSoftEntity '{self.name}': set_visual_mesh() must be called before "
@@ -563,6 +612,7 @@ class MochiSoftEntity(Entity):
             Uniform scale of the skin. Defaults to 1.0.
         """
         self._require_added("set_contact_skin")
+        self._refuse_heterogeneous("set_contact_skin")
         if self._rest_positions_moved:
             raise RuntimeError(
                 f"MochiSoftEntity '{self.name}': set_contact_skin() cannot follow set_rest_positions(). The skin "
@@ -572,6 +622,23 @@ class MochiSoftEntity(Entity):
             )
         self._entity.set_contact_skin(file=get_asset_path(file), pos=pos, euler=euler, scale=scale)
         self._has_contact_skin = True
+
+    def _refuse_heterogeneous(self, method: str) -> None:
+        """Refuse a call that places one mesh, or ties one to a link, on a heterogeneous body."""
+        if not self.has_variant_meshes:
+            return
+        if method in ("set_visual_mesh", "set_contact_skin"):
+            fix = (
+                f"call it per variant from the pre-build hook, "
+                f"`entity.entity.variants[k].{method}(get_asset_path(file))` (from eden.utils.assets) with the file "
+                f"made for variant k"
+            )
+        else:
+            fix = "build the body from one morph (EntityOptions or a primitive, not GroupedEntityOptions)"
+        raise NotImplementedError(
+            f"MochiSoftEntity '{self.name}' is heterogeneous ({self.num_variants} variants, one per env), and "
+            f"`{method}` acts on one mesh. Fix: {fix}."
+        )
 
     def _require_added(self, method: str) -> None:
         if not hasattr(self, "_entity"):
@@ -586,21 +653,33 @@ class MochiSoftEntity(Entity):
     def init_positions(self) -> np.ndarray:
         """Rest vertex positions in the world frame, shape ``(n_vertices, 3)`` (available once added to the scene)."""
         self._require_added("init_positions")
+        self._require_one_mesh("init_positions")
         return self._entity.init_positions
 
     @property
     def elems(self) -> np.ndarray:
         """Element connectivity: ``(n, 4)`` tetrahedra, ``(n, 3)`` shell triangles or ``(n, 2)`` rod segments."""
         self._require_added("elems")
+        self._require_one_mesh("elems")
         return self._entity.elems
 
     @property
     def n_vertices(self) -> int:
+        """Vertex count, of the largest variant for a heterogeneous body (the length of every vertex axis)."""
         return self._entity.n_vertices
 
     @property
     def n_elements(self) -> int:
+        self._require_one_mesh("n_elements")
         return self._entity.n_elements
+
+    def _require_one_mesh(self, what: str) -> None:
+        if self.has_variant_meshes:
+            raise TypeError(
+                f"MochiSoftEntity '{self.name}' is heterogeneous ({self.num_variants} variants), so `{what}` is "
+                f"per variant: read `entity.entity.variants[k].{what}`, with k = `entity.env_variant_idx[env]` for "
+                f"an env's own."
+            )
 
     @property
     def is_shell(self) -> bool:
