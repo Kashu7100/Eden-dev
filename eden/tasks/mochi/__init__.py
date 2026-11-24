@@ -10,6 +10,11 @@ YAM workcell, each a batched RL task with the demo's own goal as its success:
 * ``mochi_route_the_cable`` — two YAMs route a cable from its anchor past two spools and into a port (the
   board's ``routed`` goal).
 
+and, on the same workcell, Eden's version of ClothDojo's ``shirt_fold`` benchmark task for one garment:
+
+* ``mochi_fold_the_shirt`` — two YAMs fold a GarmentCodeData T-shirt from the benchmark's fold starts (ClothDojo's
+  fold quality, at rest, let go).
+
 ``common`` holds the workcell (arm mounts, gains, the bench) and the contact stiffness they share;
 ``custom_terms`` their terms, including RoboSimStudio's two grasp latches.
 """

@@ -133,7 +133,7 @@ its own page.
 | LIBERO | `libero` (one task; `--task_name` picks the LIBERO task) | [LIBERO](libero.md) |
 | SIMPLER (Bridge) | `simpler_put_carrot_on_plate`, `simpler_put_eggplant_in_basket`, `simpler_put_spoon_on_table_cloth`, `simpler_stack_green_cube_on_yellow_cube` | [SIMPLER](simpler.md) |
 | PolaRiS | `polaris_block_stack_kitchen`, `polaris_food_bussing`, `polaris_move_latte_cup`, `polaris_organize_tools`, `polaris_pan_clean`, `polaris_tape_into_container`, and a `_batched` variant of each | [PolaRiS](polaris.md) |
-| Mochi (deformables) | `mochi_fold_the_towel`, `mochi_route_the_cable`, `mochi_wipe_the_bar` | [Mochi tasks](mochi.md) |
+| Mochi (deformables) | `mochi_fold_the_shirt`, `mochi_fold_the_towel`, `mochi_route_the_cable`, `mochi_wipe_the_bar` | [Mochi tasks](mochi.md) |
 | Whiteboard | `whiteboard_draw_table`, `whiteboard_write_in_colour`, `whiteboard_write_text` | [Whiteboard](whiteboard.md) |
 | Art | `art_calligraphy_dai`, `art_calligraphy_san`, `art_calligraphy_ei`, `art_calligraphy_lettering_minimum`, `art_painting_fuji`, `art_painting_fuji_study`, `art_painting_sunset` | [Calligraphy and painting](art.md) |
 

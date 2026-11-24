@@ -1,13 +1,14 @@
 # Mochi deformable tasks
 
-Three batched RL tasks in which two arms handle a soft body: a foam sponge, a terry towel and a cable. They run on
-the Mochi solver, Eden's host of the Genesis port of Meta's SuperDex implicit solver. Read this page to train or
-replay them, and for what Mochi changes about contact-rich deformable manipulation. The code is in
+Four batched RL tasks in which two arms handle a soft body: a foam sponge, a terry towel, a cable and a T-shirt. They
+run on the Mochi solver, Eden's host of the Genesis port of Meta's SuperDex implicit solver. Read this page to train
+or replay them, and for what Mochi changes about contact-rich deformable manipulation. The code is in
 `eden/tasks/mochi/`.
 
-Each task is Eden's version of one of RoboSimStudio's three demos (`examples/08_demos` in that project), built at
-that demo's numbers on its bimanual i2RT YAM workcell and scored with the demo's own goal. Every env carries its own
-soft body in one Mochi solve.
+Three of the tasks are Eden's versions of RoboSimStudio's three demos (`examples/08_demos` in that project), built at
+each demo's numbers on its bimanual i2RT YAM workcell and scored with the demo's own goal. The fourth,
+`mochi_fold_the_shirt`, is Eden's version of ClothDojo's `shirt_fold` benchmark task for one garment, on the same
+workcell and scored with ClothDojo's fold quality. Every env carries its own soft body in one Mochi solve.
 
 <div class="grid" markdown>
 
@@ -28,14 +29,15 @@ The README labels the wiping clip as a trained policy and the folding and routin
 | `mochi_wipe_the_bar` | `wipe_the_bar` (`surface_prep`) | 50 × 75 × 30 mm `FIRM_FOAM` sponge (E 80 kPa) | 90 % of a 243-cell marker stripe on a grab bar's crown worn clean | 15 s |
 | `mochi_fold_the_towel` | `fold_the_towel` (`cloth_fold` / `towel_half`) | 30 cm terry towel, 500 g/m², 30 × 30 cells | fold score ≥ 0.85, fold extent ≤ 0.6, the towel at rest, both hands clear | 12 s |
 | `mochi_route_the_cable` | `route_the_cable` (VABAR `cable_route/port_easy`) | 600 mm, 7 mm cable of 50 segments, welded at one end | two segments in each spool's seat, three in the port with the free end, hands clear, at rest | 20 s |
+| `mochi_fold_the_shirt` | ClothDojo `shirt_fold`, garment `rand_ZZCWITH5HY` | GarmentCodeData T-shirt at 0.7 of its size, 6888 vertices, 180 g/m², 0.55 × 0.36 m flat | ClothDojo fold quality ≥ 0.142, the shirt at rest, both hands clear | 40 s |
 
 ```bash
 eden smoke --task mochi_wipe_the_bar
 eden train --task mochi_wipe_the_bar        # 256 envs, default fp32 precision
 ```
 
-Each task trains 256 envs with PPO at 30 Hz control: one 1/30 s Mochi step (`decimation=1`) with 4 Newton
-iterations (`MochiOptions(n_newton_iterations=4)`).
+Each task trains with PPO at 30 Hz control: one 1/30 s Mochi step (`decimation=1`) with 4 Newton iterations
+(`MochiOptions(n_newton_iterations=4)`), 256 envs (128 for the shirt, whose Mochi state is about 32 MiB an env).
 
 ### `mochi_wipe_the_bar`
 
@@ -70,6 +72,54 @@ than 50 mm/s and "hands clear" more than 50 mm from the cable.
 
 Both arms act: the right makes the three placements and the left plugs the end. The jaws hold the cable by
 friction at the demo's 6000 N/m servo.
+
+### `mochi_fold_the_shirt`
+
+ClothDojo (clothdojo.github.io, arXiv 2611.01190) benchmarks bimanual T-shirt flattening and folding on Newton's
+Style3D cloth with two AgileX Piper arms. This task takes its `shirt_fold` task for one garment, `rand_ZZCWITH5HY`:
+each episode starts from one of the garment's four benchmark fold starts (the shirt settled flat, sleeves out, at
+0, 90, 180 and 270 degrees). Both arms move their tool centres by differential IK, turn them about the vertical, and
+close with `FeatureGraspLatch`, which seizes at most 32 vertices within 1.5 cm of the tool centre, close to
+ClothDojo's own particle grasp.
+
+The garment is ClothDojo's at 0.7 of its size, laid 0.19 m nearer the arms than ClothDojo lays it. The YAMs are
+smaller arms than ClothDojo's Pipers: at 3 cm over the bench each reaches its own half of the bench to about 0.10 m
+past the middle, and only to about 2 cm short of the centre line. At full size and ClothDojo's place even a half
+fold, hem to shoulders, needs the hem carried from x = -0.14 m to +0.36 m. The reset and the metric scale the
+benchmark's starts and flat reference in the plane (`planar_scale`), heights kept, so the layers stay as thick as
+before. That makes the same cloth relatively thicker: a flat start scores -1.62 here against ClothDojo's -1.39.
+The hands' turn is free (`orientation_scale=[0, 0, 0.1]`, as in `mochi_route_the_cable`): with it held, the wrist
+rolls against every turn of the base and its ±2.09 rad stops end the reach well short of the middle.
+
+Success is ClothDojo's fold quality Q (`custom_terms.shirt.ShirtFoldQuality`) at or above its threshold, 0.142,
+with the shirt at rest and both hands clear. Q is a fixed linear model over five geometric features of the vertex
+positions: footprint compression, flatness, how much of the top is one planar rectangle, layer overlap and
+closeness to the table. ClothDojo's flat shirt scores about -1.4 and its expert folds +0.3 to +1.0. The port
+reproduces ClothDojo's NumPy and OpenCV implementation exactly (the top-down raster runs batched on the GPU), and
+costs about 10 ms per env, so the metric is scored every 5 control steps and held in between. ClothDojo also asks
+Q to hold for 3 s; "at rest and let go" stands in for that hold, as for the towel.
+
+The threshold was checked on Mochi rather than refitted. Eight frames of ClothDojo's published expert fold, scaled
+like the task's starts and laid into its scene, were settled for 4 s. Seven settled at Q +0.19 to +1.14, all above
+the threshold (change -0.09 to +0.54, mean +0.21), so it is kept; one frame's solve diverged.
+`examples/recipes/mochi/fold_the_shirt_threshold.py` reruns the measurement.
+
+The task's scripted demonstrator, `ShirtFolder` (`eden/tasks/mochi/scripted_demos.py`), folds the sleeves in and
+then the length in thirds with both YAMs, through the task's own actions. `eden datagen` records it from the two
+starts with the sleeves across the bench; the far sleeve of the other two is out of reach:
+
+```bash
+eden datagen --task mochi_fold_the_shirt --num_envs 16 \
+    --override 'event_options: {fold_start: {state_indices: [1, 3]}}'
+```
+
+It does not reach the task's success: its final fold quality runs about -0.9 to -2.3, held back by a lumpy top
+(the planar-top feature) and by sleeve folds that sometimes slip. `eden datagen --show_viewer` shows it as it records,
+and `examples/recipes/mochi/fold_the_shirt_nyx.py` path traces it in LIBERO's kitchen.
+
+The garment's files are converted from ClothDojo's Hub dataset by `examples/recipes/mochi/convert_clothdojo_shirt.py`
+into `objects/clothdojo/rand_ZZCWITH5HY/` of Eden's asset dataset: the mesh (`shirt.obj`, in the USD's vertex order)
+and the four starts with the flat reference (`fold_starts.npz`, in ClothDojo's world frame).
 
 ### Rewards and terminations
 
@@ -140,6 +190,12 @@ arms and couples SuperDex (the sponge) or VBD (the towel, the cable's capsules) 
 - **The arms collide**, where the demo's pass through each other. So the right hand presses the towel at
   `(0.08, -0.04)`, 80 mm farther out than the demo's mark: at the demo's mark the folding arm stopped against the
   pressing one 45 mm short of its place.
+- **The shirt's rest shape is its sewn 3D form.** Mochi takes a shell's bending rest from the mesh it is built from;
+  ClothDojo's Style3D cloth bends toward its flat sewing panels. With the bending derived from the material (D ≈
+  9e-6 N m) a shirt laid flat sprang 1 cm back toward its 3D form and lost 0.5 of fold quality settling, so the task
+  sets D = 1e-6 N m outright, near ClothDojo's 1.25e-6, and the loss is 0.1.
+- **The shirt's layers are ClothDojo's 5 mm.** At a 4 mm collider radius (8 mm layers) a folded stack settled 1-2 cm
+  taller and lost 0.3-0.6 of fold quality; at ClothDojo's 2.5 mm particle radius it kept it.
 - **The sponge is meshed 6 × 9 × 4** (350 nodes, about 8 mm apart) rather than the demo's 9 × 13 × 6 (980): twice
   as fast.
 - **The cable** is a Mochi discrete elastic rod with the demo cable's bending rigidity (its per-joint stiffness

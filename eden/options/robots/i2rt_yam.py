@@ -74,6 +74,9 @@ class Yam(RobotOptions):
     default_dofs_force_limits: dict[str, float] = {p: s.EFFORT_LIMIT for p, s in _Yam_DOFS_SPEC.items()}
 
     ee_links_name: ClassVar[list[str]] = ["link_6"]
+    # The point between the fingertip pads, in link_6's frame, measured on the built arm: the pads' contact patches on
+    # a gripped sponge centre here (the Mochi workcell's tool centre). The jaws close along link_6's x.
+    tcp_offset: ClassVar[tuple[float, float, float]] = (0.0, -0.044, 0.1305)
     open_dofs_pos: ClassVar[dict[str, float]] = {
         "left_finger": 0.037524,
         "right_finger": -0.037524,

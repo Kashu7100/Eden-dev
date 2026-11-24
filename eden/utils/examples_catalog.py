@@ -112,8 +112,9 @@ OPTIONAL_DEPS = {
 REQUIRED = frozenset({"tier", "capabilities", "hardware", "run"})
 
 # Modules under ``examples/`` that are not themselves examples — no header required.
-# Two kinds: helper modules an example imports, and offline asset converters that record how a
-# hosted asset was produced. Modules inside a *package* (a directory carrying __init__.py, e.g.
+# Three kinds: helper modules an example imports, offline asset converters that record how a
+# hosted asset was produced, and offline measurements that record how a task's constant was derived
+# (each fetches third-party data a smoke run should not download). Modules inside a *package* (a directory carrying __init__.py, e.g.
 # an example-local training stack like extreme_parkour/rma_training) need no entry here:
 # entry_points() skips packages wholesale — a package is by definition imported, not run.
 EXCLUDE = frozenset(
@@ -124,7 +125,9 @@ EXCLUDE = frozenset(
         "examples/recipes/mochi/_finray.py",
         "examples/recipes/mochi/_nyx.py",
         "examples/recipes/mochi/_rj45.py",
+        "examples/recipes/mochi/convert_clothdojo_shirt.py",
         "examples/recipes/mochi/convert_rj45_asset.py",
+        "examples/recipes/mochi/fold_the_shirt_threshold.py",
         "examples/recipes/retargeting/dex_retargeter/hand_presets.py",
         "examples/recipes/retargeting/dex_retargeter/single_hand_detector.py",
     }

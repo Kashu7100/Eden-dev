@@ -11,6 +11,7 @@ from eden.tasks.manipulation.dex_lift.config import ManipulationDexLiftConfig
 from eden.tasks.manipulation.lift_box.config import ManipulationLiftBoxConfig
 from eden.tasks.manipulation.lift_box_rgb.config import ManipulationLiftBoxRGBConfig
 from eden.tasks.manipulation.reach_droid.config import ManipulationReachDroidConfig
+from eden.tasks.mochi.fold_the_shirt.config import MochiFoldTheShirtConfig
 from eden.tasks.mochi.fold_the_towel.config import MochiFoldTheTowelConfig
 from eden.tasks.mochi.route_the_cable.config import MochiRouteTheCableConfig
 from eden.tasks.mochi.wipe_the_bar.config import MochiWipeTheBarConfig
@@ -31,6 +32,7 @@ def _terms(group) -> dict:
         ManipulationLiftBoxRGBConfig,
         MochiWipeTheBarConfig,
         MochiFoldTheTowelConfig,
+        MochiFoldTheShirtConfig,
         MochiRouteTheCableConfig,
         HomieLocomotionConfig,
     ],
