@@ -112,9 +112,18 @@ checkpoints of both (40 clips, randomization on):
 | `--recipe blinkmimic` | 500 | 5 min | 8 | 29.2 mm |
 | `--recipe blinkmimic` | 1000 | 10 min | 3 | 24.8 mm |
 
+On BONES-SEED (129,513 clips), same GPU and env count, one seed, on 2,000 clips drawn from the training list:
+
+| Options | Iterations | Training time | Failed clips | MPJPE |
+|---|---|---|---|---|
+| default | 2000 | 40 min | 5 | 24.2 mm |
+| `--recipe blinkmimic` | 500 | 5 min | 7 | 26.0 mm |
+| `--recipe blinkmimic` | 1000 | 10 min | 4 | 24.4 mm |
+| `--recipe blinkmimic` | 2000 | 20 min | 2 | 22.9 mm |
+
 Training time is that many iterations at the time per iteration above, without startup. The failed-clip count moves
-by a few clips from one checkpoint to the next. Time per round varies by a few percent between nodes of the same GPU
-model.
+by a few clips from one checkpoint to the next and, on BONES-SEED, by about two between evaluations of one
+checkpoint. Time per round varies by a few percent between nodes of the same GPU model.
 
 ## Evaluate
 
