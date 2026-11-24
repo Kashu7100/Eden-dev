@@ -57,12 +57,10 @@ class KinematicLinksMotion(MotionTerm):
     Parameters
     ----------
     compile_kinematics : bool
-        Run the kinematics through ``torch.compile`` on a CUDA device. The pass is a few thousand elementwise
-        operations on small tensors, so eagerly it costs their dispatch (about 10 ms per fill at any env count),
-        and compiled it is a few fused kernels (under 1 ms). The first fill of every env and the first fill of a
-        subset of the envs each take a compile (tens of seconds with an empty compile cache). The fused kernels may
-        contract a multiply and an add, so the link fields differ from the eager ones in the last bits. ``False``
-        runs the pass eagerly, as a CPU device always does.
+        Run the kinematics through ``torch.compile`` on a CUDA device, which fuses its few thousand small
+        elementwise operations into a few kernels. The first fill of every env and the first fill of a subset each
+        wait for a compile, and the link fields differ from the eager ones in the last bits. ``False`` runs the
+        pass eagerly, as a CPU device always does.
     """
 
     compile_kinematics: bool = True
@@ -102,10 +100,9 @@ class KinematicLinksMotion(MotionTerm):
         data_buffer: MotionReferenceData,
     ) -> None:
         """The link fields of ``data_buffer[envs_idx]`` by forward kinematics of its root and joint fields."""
-        # torch.compile keeps one compiled pass per grad and inference mode and per input layout, and each costs
-        # tens of seconds. Two are needed: every env through a slice (fixed row count), and a subset through its
-        # ids, whose row count changes from one reset to the next and is declared so from its first fill. Always
-        # in inference mode, whatever the caller's: a training loop steps in it, the env's first reset does not.
+        # torch.compile compiles once per grad mode and input layout. Two layouts are needed: every env through a
+        # slice, and a subset through its ids, whose row count is declared dynamic from its first fill. Inference
+        # mode is forced, so a training loop's steps and the env's first reset share the compiled passes.
         with torch.inference_mode():
             state = [getattr(data_buffer, field)[envs_idx].flatten(0, 1) for field in _STATE_FIELDS]
             if self._compiled and not isinstance(envs_idx, slice):

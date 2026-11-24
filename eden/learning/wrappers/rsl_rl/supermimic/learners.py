@@ -61,11 +61,9 @@ def optimize(
 ) -> torch.Tensor:
     """``zero_grad -> backward -> clip the global norm (and each element) -> step``; returns the gradient norm.
 
-    ``lr_scale``, a 0-dim tensor, multiplies the learning rate of every optimizer for this step. The step of Adam
-    and of Muon is proportional to the learning rate, so the parameters move ``lr_scale`` times the step taken at
-    the optimizers' own rate. A captured update reads the tensor on every replay. A changed learning rate of the
-    optimizers would not reach it: ``torch.optim.Muon`` reads its rate on the host, so a recorded update keeps the
-    rate it was recorded with.
+    ``lr_scale``, a 0-dim tensor, scales the step, which for Adam and Muon equals scaling the learning rate. A
+    captured update reads the tensor on every replay, whereas ``torch.optim.Muon`` reads its learning rate on the
+    host, so a captured update would keep the rate it was recorded with.
     """
     for optimizer in optimizers:
         optimizer.zero_grad(set_to_none=True)
@@ -139,8 +137,7 @@ class CapturedUpdate:
     recorded. A replay raises if a tensor in ``state()`` moved, so a checkpoint's optimizer state is loaded into
     the existing tensors (:func:`load_optimizer_state`). On the CPU ``fn`` always runs eagerly.
 
-    A call returns once the replay is done, so the time around it is the update's. ``wait=False`` returns as soon
-    as the replay is queued: later work on the stream runs after it, and the host goes on meanwhile.
+    A call returns once the replay is done; ``wait=False`` returns once it is queued on the stream.
     """
 
     def __init__(
@@ -263,9 +260,7 @@ class WorldModelLearner:
     def _mirror_first(
         self, states: torch.Tensor, actions: torch.Tensor, sim_ctx: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """The batch with its first ``mirror_share`` windows mirrored. The windows are drawn at random, so their
-        order carries no information.
-        """
+        """The batch with its first ``mirror_share`` windows mirrored; they are drawn at random, so any will do."""
         n, mirror = int(states.shape[0] * self.options.mirror_share), self.mirror
         return (
             torch.cat([mirror.state(states[:n]), states[n:]]),
@@ -321,9 +316,8 @@ class PolicyLearner:
     then fits TD(lambda) targets of the same rollouts (5 epochs of 4 minibatches). Values never exceed ``v_max``, the
     return of the largest reward every step. ``algorithm="bptt"`` has no critic and sums the rewards undiscounted.
 
-    With ``options.ema_decay``, :attr:`actor_ema` follows the actor: after each actor step every weight and
-    normalizer statistic moves ``1 - ema_decay`` of the way to the actor's. It starts as a copy of the actor at the
-    first update, when the actor's normalizers hold collected data.
+    With ``options.ema_decay``, :attr:`actor_ema` moves ``1 - ema_decay`` of the way to the actor after each actor
+    step. It starts as a copy of the actor at the first update, when the actor's normalizers hold collected data.
     """
 
     def __init__(

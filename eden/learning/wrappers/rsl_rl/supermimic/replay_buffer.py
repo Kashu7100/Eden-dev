@@ -73,9 +73,7 @@ class ReplayBuffer:
     def _valid_windows(self, sequence_length: int) -> tuple[torch.Tensor, torch.Tensor, bool]:
         """The windows of ``sequence_length`` steps with no episode end before their last step: each env's count
         ``(num_envs,)``, the cumulative counts by age of the first step, flattened and offset per env for
-        :meth:`sample`'s search, and whether there is any window.
-
-        Counted once per write: the samples drawn between two writes share the count and its one host read.
+        :meth:`sample`'s search, and whether there is any window. Counted once per write.
         """
         L, E, T, n = sequence_length, self.num_envs, self.buffer_size, self.num_transitions
         if L > T:
@@ -115,10 +113,8 @@ class ReplayBuffer:
         A window may end on a terminating or truncating step but holds none before its last step. An env is drawn
         uniformly among those with a valid window, and a window uniformly within its env, so a window of an env
         with few valid windows is drawn more often than one of an env with many. ``fields`` names the stored fields
-        to return, every one by default; the windows drawn do not depend on it.
-
-        ``num_batches`` returns ``(num_batches, batch_size, sequence_length)``: the windows that many successive
-        calls would draw, in their order, located and gathered together.
+        to return, every one by default. ``num_batches`` returns ``(num_batches, batch_size, sequence_length)``, the
+        windows that many successive calls would draw.
         """
         L, B, T, n = sequence_length, batch_size, self.buffer_size, self.num_transitions
         base, dev = self._base(), self.device

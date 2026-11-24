@@ -110,8 +110,7 @@ class MultiEncoderActor(nn.Module):
     state (``latent_bc_weight``), which updates only that task's encoder.
 
     The input ``TensorDict`` holds ``history`` ``(B, H, obs_dim)``, the newest frame last, and ``goal_<task>`` per task.
-    With ``reference_action`` it also holds ``reference_action`` ``(B, action_dim)``, which is added to the decoder's
-    output, and the decoder's output layer starts at 1% of its default initialization with no bias.
+    With ``reference_action`` it also holds ``reference_action`` ``(B, action_dim)``, added to the decoder's output.
     """
 
     def __init__(
@@ -141,7 +140,7 @@ class MultiEncoderActor(nn.Module):
         self.encoders = nn.ModuleDict({s.name: build_mlp(s.goal_dim, hidden_dims, latent_dim) for s in goal_specs})
         self.decoder = build_mlp(latent_dim + history_length * obs_dim, hidden_dims, action_dim)
         if reference_action:
-            # A small output layer, as BlinkMimic initializes it: the untrained actor commands nearly the reference.
+            # A small output layer: the untrained actor commands nearly the reference.
             with torch.no_grad():
                 self.decoder[-1].weight.mul_(0.01)
                 self.decoder[-1].bias.zero_()

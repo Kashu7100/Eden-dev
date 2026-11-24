@@ -3510,8 +3510,8 @@ class RigidEntity(Entity, SupportSurfaceMixin, DofDefaultsMixin):
         """
         # Memoized per resolved selection: reading an index tensor back with `.tolist()` and uploading the
         # geom ids would be a GPU->CPU sync each, every step a privileged observation reads friction. A range
-        # is remembered by its bounds and an index tensor by identity and version, as `_genesis_selection`
-        # remembers them; an inference tensor tracks no version and is read back on every call.
+        # is keyed by its bounds and an index tensor by identity and version; an inference tensor has no version
+        # and is read back on every call.
         selection = range(self.num_links) if ls_idx_local is None else _genesis_selection(ls_idx_local)
         cache = self.__dict__.setdefault("_first_geom_idx_cache", {})
         if isinstance(selection, range):

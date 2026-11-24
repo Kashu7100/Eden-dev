@@ -118,11 +118,8 @@ class RunLogger:
         print("\n".join(lines))
 
     def _write_scalars(self, scalars: dict[str, float], step: int) -> None:
-        """Write an iteration's scalars to TensorBoard as one event holding every tag.
-
-        ``SummaryWriter.add_scalar`` writes one event per scalar, and the writer appends each event to the file with
-        an open and a close: about 40 per iteration, 12 ms on a network file system, which the next ``add_scalar``
-        waits for once ten are pending. TensorBoard reads the tags of one event as it reads those of forty.
+        """Write an iteration's scalars to TensorBoard as one event holding every tag. ``add_scalar`` writes one
+        event per scalar, each appended with an open and a close of the file, which is slow on a network file system.
         """
         from tensorboard.compat.proto.summary_pb2 import Summary
         from torch.utils.tensorboard.summary import scalar

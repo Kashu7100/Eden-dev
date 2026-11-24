@@ -45,8 +45,7 @@ from eden.learning.wrappers.rsl_rl.supermimic.world_model_env import (
 if TYPE_CHECKING:
     from eden.envs.wrappers.rsl_rl_env import RslRlVecEnvWrapper
 
-#: Entries of the layout record (:meth:`_SuperMimicRunner._layout`) that checkpoints written before the entry
-#: existed lack, with the value those checkpoints were trained with.
+#: Layout entries (:meth:`_SuperMimicRunner._layout`) a checkpoint may lack, with the value it then trained with.
 _LAYOUT_DEFAULTS = {"runner_options.policy.reference_action": False}
 
 
@@ -150,8 +149,7 @@ class _SuperMimicRunner:
         #: Allocated by :meth:`learn`; a runner built to replay a checkpoint holds no transitions.
         self.replay_buffer: ReplayBuffer | None = None
         self._history: torch.Tensor | None = None
-        #: The policy's part of a collected step (:meth:`_act_from`), replayed from a CUDA graph. The host does not
-        #: wait for it: the env step that follows queues behind it.
+        #: :meth:`_act_from` as a CUDA graph the host does not wait for: the env step queues behind it.
         self._act = CapturedUpdate(self._act_from, lambda: graph_state([self.actor, self.dynamics], []), wait=False)
         #: Reset bins of a loaded checkpoint whose return sampler does not fit this run's library (:meth:`load`).
         self._stale_sampler_bins: int | None = None
@@ -386,11 +384,8 @@ class _SuperMimicRunner:
 
     def _act_from(self, inputs: TensorDict) -> dict[str, torch.Tensor]:
         """The deterministic policy's action for a collected step, then that step folded into the running
-        normalizers of the world model and the actor: the action reads the statistics of the steps before it.
-
-        A few hundred small kernels on fixed shapes with no host read, which on CUDA replay from one graph
-        (:class:`~eden.learning.wrappers.rsl_rl.supermimic.learners.CapturedUpdate`). A replay runs no Python, so
-        the actor's mode stays as the last eager call left it, train.
+        normalizers, so the action reads the statistics of the steps before it. A graph replay runs no Python, so
+        the actor's mode stays train, as the last eager call left it.
         """
         state = inputs["state"]
         actor_in = self._policy_input(state, inputs["sensor"], inputs["frame"], history=inputs.get("history", None))
@@ -402,8 +397,8 @@ class _SuperMimicRunner:
         return {"action": actions}
 
     def _record_returns(self, rewards: torch.Tensor, ended: torch.Tensor) -> None:
-        """Add one env step to each env's episode and, for an episode that ended, its normalized return (summed
-        reward over length times the largest step reward) to the iteration's tally.
+        """Add one env step to each env's episode, and the normalized return of each episode that ended (reward
+        per step over the largest step reward) to the iteration's tally.
         """
         self._episode_reward += rewards
         self._episode_steps += 1
@@ -419,9 +414,7 @@ class _SuperMimicRunner:
         return total / count if count else None
 
     def _lr_multiplier(self, iteration: int) -> float:
-        """The actor's learning-rate multiplier during ``iteration``: ``policy.lr_multiplier`` until the ramp
-        starts, then linearly down to 1 over ``policy.lr_decay_iterations`` iterations.
-        """
+        """The actor's learning-rate multiplier during ``iteration``."""
         policy = self.options.policy
         if self._lr_decay_start is None:
             return policy.lr_multiplier
@@ -429,9 +422,7 @@ class _SuperMimicRunner:
         return policy.lr_multiplier + (1.0 - policy.lr_multiplier) * progress
 
     def _start_lr_decay_if_due(self, next_iteration: int, normalized_return: float | None) -> None:
-        """Start the ramp at ``next_iteration`` once the return reaches ``policy.lr_decay_return`` or the deadline
-        ``policy.lr_decay_deadline`` has come.
-        """
+        """Start the ramp at ``next_iteration`` if the return or the deadline calls for it."""
         policy = self.options.policy
         if self._lr_decay_start is not None:
             return
@@ -599,10 +590,8 @@ class _SuperMimicRunner:
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict | None:
         """Restore a checkpoint :meth:`save` wrote. ``load_optimizer=False`` leaves the optimizers as they are; the
         networks, the iteration, the start of the learning-rate ramp and the return sampler's bin values are always
-        restored, and the motion term gets the restored reset distribution.
-
-        A checkpoint written without ``policy.ema_decay`` holds no average of the actor; a runner that keeps one
-        starts it from the checkpoint's actor.
+        restored, and the motion term gets the restored reset distribution. A runner that averages the actor starts
+        the average from the actor of a checkpoint that holds none.
 
         A checkpoint trained on another motion library has another number of reset bins. Its policy still replays,
         so the load keeps the networks and leaves the sampler as it is; :meth:`learn` then raises.

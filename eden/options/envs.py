@@ -43,9 +43,8 @@ class CudaGraphOptions(ConfigurableOptions):
         nearly every step would re-capture and re-validate every step, which costs more than the eager phase.
         Defaults to 2.
     require_cuda : bool
-        Raise at build when the env is not on a CUDA device. ``False`` runs the graded phase eagerly there
-        instead, for a task config that turns the graph on and must also build on a CPU or Metal host.
-        Defaults to True.
+        Raise at build when the env is not on a CUDA device. ``False`` runs the graded phase eagerly there, for a
+        task config that must also build on a CPU or Metal host. Defaults to True.
     """
 
     warmup_steps: PositiveInt = 2

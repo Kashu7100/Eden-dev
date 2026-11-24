@@ -1,16 +1,9 @@
 """The left-right mirror image of a state, an action and a simulation context, for augmenting world-model batches.
 
-The mirror reflects the world y axis, ``M = diag(1, -1, 1)``. Positions and linear velocities map to ``M x``,
-angular velocities, which are pseudo-vectors, to ``-M w``, and a rotation ``R`` to ``M R M``, which is the wxyz
-quaternion ``(w, -x, y, -z)``; :mod:`eden.utils.symmetry` holds these maps. A joint takes the value of its left/right
-partner, negated for a roll or yaw joint. The mirror image of a mirror image is the original.
-
-The joint mapping follows from the joint names alone. For a robot whose names or joint axes break that convention,
-the world model would train on states the robot cannot reach, so :meth:`Mirror.check_kinematics` compares the
-mapping with the robot's forward kinematics, and the runner calls it at construction.
-
-The augmentation and the naming rule follow BlinkMimic (https://github.com/fuyichen0725/blinkmimic, MIT License,
-Copyright (c) 2026 Fuyi Chen), ``src/blinkmimic/mirror.py``.
+The mirror reflects the world y axis (:mod:`eden.utils.symmetry`), and a joint takes the value of its left/right
+partner, negated for a roll or yaw joint. That mapping follows from the joint names alone, so
+:meth:`Mirror.check_kinematics` compares it with the robot's forward kinematics at construction. After BlinkMimic's
+``mirror.py`` (https://github.com/fuyichen0725/blinkmimic, MIT).
 """
 
 from __future__ import annotations
@@ -29,15 +22,12 @@ if TYPE_CHECKING:
 
 _SIDE = re.compile(r"(?<![A-Za-z])(left|right)(?=_)")
 _FLIPPED_AXIS = re.compile(r"(?<![A-Za-z])(roll|yaw)(?![A-Za-z])")
-#: Largest distance (m) between a tracked link of a mirrored state and the mirror image of its partner link that
-#: :meth:`Mirror.check_kinematics` accepts.
+#: Largest distance (m) :meth:`Mirror.check_kinematics` accepts between a link and its partner's mirror image.
 _KINEMATICS_TOLERANCE_M = 1e-3
 
 
 def mirror_name(name: str) -> str:
-    """``name`` with ``left`` and ``right`` swapped (``left_knee_joint`` -> ``right_knee_joint``); a name with
-    neither is returned as it is.
-    """
+    """``name`` with ``left`` and ``right`` swapped; a name with neither is returned as it is."""
     return _SIDE.sub(lambda side: "right" if side.group(1) == "left" else "left", name)
 
 
@@ -62,9 +52,7 @@ def joint_signs(joint_names: Sequence[str]) -> list[float]:
 def context_permutation(
     columns: Sequence[tuple[str, str]], joint_names: Sequence[str]
 ) -> tuple[list[int], list[float]]:
-    """The partner column and the sign of each simulation context column (``SimContext.columns``): the foot
-    friction and the encoder bias of the other side, and the lateral centre-of-mass offset negated.
-    """
+    """The partner column and the sign of each simulation context column (``SimContext.columns``)."""
     signs = {"friction": 1.0, "com_x": 1.0, "com_y": -1.0, "com_z": 1.0}
     joint_sign = dict(zip(joint_names, joint_signs(joint_names), strict=True))
     unknown = sorted({kind for kind, _ in columns} - signs.keys() - {"encoder_bias"})
@@ -161,10 +149,8 @@ class Mirror:
 
     @torch.no_grad()
     def check_kinematics(self, fk: torch.nn.Module, joint_limits: torch.Tensor, samples: int = 256) -> None:
-        """Raise unless the tracked links of a mirrored state lie on the mirror image of their partner links.
-
-        ``fk`` is the forward kinematics of the tracked links (``fk.link_names``). The poses are drawn uniformly
-        within ``joint_limits`` ``(J, 2)``, with a random root pose and random velocities.
+        """Raise unless the tracked links (``fk.link_names``) of a mirrored state lie on the mirror image of their
+        partner links, over ``samples`` random poses within ``joint_limits`` ``(J, 2)``.
         """
         device = joint_limits.device
         link_perm = torch.tensor(mirror_permutation(fk.link_names, "tracked link"), device=device)

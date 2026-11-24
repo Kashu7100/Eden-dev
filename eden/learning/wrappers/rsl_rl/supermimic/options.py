@@ -29,8 +29,8 @@ class WorldModelOptions(ConfigurableOptions):
         Nominal error of each channel group of the state loss; a group is weighted by ``1 / nominal_error^2``.
     mirror_share : float
         Share of each batch, in ``[0, 1]``, replaced by its left-right mirror image
-        (:class:`~eden.learning.wrappers.rsl_rl.supermimic.mirror.Mirror`); 0 mirrors nothing. The robot and the
-        task's randomization must be mirror symmetric, which the runner checks at construction.
+        (:class:`~eden.learning.wrappers.rsl_rl.supermimic.mirror.Mirror`). Above 0, the runner checks at
+        construction that the robot and the task's randomization are mirror symmetric.
     """
 
     hidden_dims: tuple[int, ...] = (1024, 1024, 1024)
@@ -64,26 +64,19 @@ class PolicyOptions(ConfigurableOptions):
     lr_multiplier : float
         The actor steps at ``lr * lr_multiplier``; the critic keeps ``lr``.
     lr_decay_return : float | None
-        Once the mean normalized return of an iteration reaches this, ``lr_multiplier`` ramps linearly to 1 over
-        ``lr_decay_iterations`` iterations. The normalized return of an episode is its summed reward over its
-        length times the largest reward of one step, in ``(-inf, 1]``; the runner averages it over the episodes
-        that ended during the iteration and logs it as ``Train/mean_normalized_return``. It is the simulator's
-        reward of the collecting actor, BlinkMimic's ``ep_ret_norm``, which BlinkMimic averages over 125 env steps
-        where one iteration here has ``num_steps_per_env``. ``None`` leaves the return out of the schedule.
+        Once ``Train/mean_normalized_return`` reaches this, ``lr_multiplier`` ramps linearly to 1 over
+        ``lr_decay_iterations`` iterations. That return is the mean, over the episodes that ended in an iteration,
+        of the episode's reward per step over the largest reward of one step. ``None`` leaves it out of the schedule.
     lr_decay_deadline : int | None
         The iteration at which the ramp starts if the return has not started it; ``None`` sets no deadline.
     lr_decay_iterations : int
         Iterations the ramp takes.
     ema_decay : float
-        Decay per actor step of a Polyak average of the actor, its weights and normalizer statistics, in
-        ``[0, 1)``. Replay (``eden inference``, ``get_inference_policy``) runs the average, and collection keeps the
-        trained actor. 0 keeps no average.
+        Decay per actor step of a Polyak average of the actor, in ``[0, 1)``. Replay runs the average and
+        collection the trained actor. 0 keeps no average.
     reference_action : bool
-        Add the action that commands the reference pose of the next frame, ``(q_ref - q0) / action scale``, to the
-        actor's output, so the network learns a correction to tracking the reference with the joint controller.
-        The scale and ``q0`` are the action term's. The network's output layer starts small, so the untrained
-        actor commands nearly the reference pose. A checkpoint records the option and loads only under the value it
-        trained with.
+        Add the action that commands the reference joint positions of the next frame to the actor's output, so the
+        network learns a correction to it. A checkpoint loads only under the value it trained with.
     num_batches : int
         Actor steps per update, one imagined batch each.
     batch_size : int
@@ -226,9 +219,8 @@ class ReturnSamplerOptions(ConfigurableOptions):
     keep : float
         Share of resets on the bins in proportion to the summed squared focus they received.
     failure : float
-        Share of resets on the bins up to ``failure_lead_s`` before the frames where episodes recently ended in a
-        fall, within the fall's clip, in proportion to a decayed fall rate. Until a fall is recorded the share goes
-        to the other three in their proportions. 0 records no falls.
+        Share of resets on the bins up to ``failure_lead_s`` before the frames of recent falls, within the fall's
+        clip. Until a fall is recorded the other shares take it.
     failure_lead_s : float
         How long before a fall the resets of the ``failure`` share start, at most.
     """
@@ -317,7 +309,8 @@ SUPERMIMIC_RUNNER_CLASS_NAME = "eden.learning.wrappers.rsl_rl.supermimic.runner:
 
 
 class SuperMimicRunnerOptions(RslRlBaseRunnerOptions):
-    """SuperMimic: a motion tracker trained through one learned, differentiable world model.
+    """SuperMimic: a motion tracker trained through one learned, differentiable world model. The defaults add
+    BlinkMimic's learner-side recipe (https://github.com/fuyichen0725/blinkmimic) to the paper's method.
 
     Each iteration steps the simulator ``num_steps_per_env`` times with the deterministic policy, storing every
     transition in a replay buffer. On average ``num_envs / (num_batches * batch_size * horizon) * replay_ratio``

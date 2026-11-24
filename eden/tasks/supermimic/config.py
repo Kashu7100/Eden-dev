@@ -167,7 +167,7 @@ class SuperMimicConfig(EdenMimicConfig):
         batch_dofs_info=False,
         enable_self_collision=True,
         enable_multi_contact=True,
-        # The terminations and rewards replay from a CUDA graph, 0.8 ms per step instead of 3.4 ms at 4096 envs.
+        # The terminations and rewards replay from a CUDA graph; a CPU host computes them eagerly.
         cuda_graph_options=CudaGraphOptions(require_cuda=False),
     )
 

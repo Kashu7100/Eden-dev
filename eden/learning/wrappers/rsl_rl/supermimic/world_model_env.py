@@ -27,7 +27,7 @@ def actor_input(
     reference_action: torch.Tensor | None = None,
 ) -> TensorDict:
     """The actor's input: the observation ``history`` ``(B, H, obs_dim)``, one ``goal_<name>`` per goal interface,
-    in imagination the critic's input, and the reference action of an actor that adds it to its output.
+    in imagination the critic's input, and the reference action of an actor that adds it.
     """
     obs = {"history": history} | {f"goal_{name}": goal for name, goal in goals.items()}
     if critic is not None:
@@ -38,7 +38,7 @@ def actor_input(
 
 
 def reference_action(library: MotionLibrary, frames: torch.Tensor, dynamics: Dynamics) -> torch.Tensor:
-    """The action that commands the reference joint positions of the frame after ``frames``, the frame the step from
+    """The action that commands the reference joint positions of the frame after ``frames``, which the step from
     ``frames`` is graded against. A clip's last frame commands its own pose.
     """
     following = torch.minimum(frames + 1, library.last_frame(frames))

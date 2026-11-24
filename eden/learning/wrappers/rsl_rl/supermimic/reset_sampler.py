@@ -56,9 +56,9 @@ class ReturnSampler:
     max_step_reward : float
         The largest reward of one step; a bin reads ``v_max = max_step_reward / (1 - gamma)`` until measured.
     library : MotionLibrary | None
-        The motion library, whose clip starts bound the bins of the failure share; needed with ``options.failure``.
+        The motion library, whose clip starts bound the failure share's bins. Needed with ``options.failure``.
     bin_frames : int
-        Frames of one bin; needed with ``options.failure``.
+        Frames of one bin. Needed with ``options.failure``.
     """
 
     def __init__(
@@ -142,9 +142,8 @@ class ReturnSampler:
         """Fold one env step's episode ends into the fall rate of the bins before them.
 
         An episode that ended at frame ``f`` is one sample, 1 for a fall and 0 otherwise, of every bin holding a
-        frame ``f - k * bin_frames`` of its clip, ``k = 1 .. lead bins``; an episode that ended within one bin of
-        its clip's start is a sample of the clip's first bin. A bin moves towards the mean of its samples of this
-        step, and all bins fade on a step in which an episode ended.
+        frame ``f - k * bin_frames`` of its clip, ``k = 1 .. lead bins``, or of the clip's first bin if there is
+        none. A bin moves towards the mean of its samples of the step.
         """
         start = self._library.starts[self._library.clip(frames)].unsqueeze(1)
         before = frames.unsqueeze(1) - self._lead_frames
@@ -233,6 +232,6 @@ class ReturnSampler:
                 "trained on, or start a new run."
             )
         self.value, self.count, self.effort = (state[k].to(self.value.device) for k in ("value", "count", "effort"))
-        # A checkpoint written without the failure share holds no fall rate: the share starts with none recorded.
+        # A checkpoint written without the failure share holds no fall rate.
         fall_rate = state.get("fall_rate")
         self.fall_rate = torch.zeros_like(self.value) if fall_rate is None else fall_rate.to(self.value.device)
