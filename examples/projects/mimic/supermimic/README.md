@@ -51,11 +51,11 @@ eden train --task supermimic --dataset bones_seed --raw_data_path /data/bones_se
 ```
 
 The first run prepares the library into `--processed_data_path` (13.5 GB for BONES-SEED, root and joints only;
-link states are computed by forward kinematics when an env reads them); later runs load it. One iteration takes
-about 0.6 s on an L40S (0.24 s collection, 0.37 s learning), which is 147 ms per update round. A run starts in about
-1 minute when `torch.compile`'s caches are warm and in about 5 minutes when they are empty. The caches live under
-`/tmp` unless `TORCHINDUCTOR_CACHE_DIR` and `TRITON_CACHE_DIR` name another directory, so on a cluster point both at
-a shared filesystem.
+link states are computed by forward kinematics when an env reads them); later runs load it. Training takes about
+13 GB of GPU memory on top of the library. One iteration takes about 0.6 s on an L40S (0.24 s collection, 0.37 s
+learning), which is 147 ms per update round. A run starts in about 1 minute when `torch.compile`'s caches are warm
+and in about 5 minutes when they are empty. The caches live under `/tmp` unless `TORCHINDUCTOR_CACHE_DIR` and
+`TRITON_CACHE_DIR` name another directory, so on a cluster point both at a shared filesystem.
 
 ## Measured
 
