@@ -60,12 +60,12 @@ and in about 5 minutes when they are empty. The caches live under `/tmp` unless 
 ## Measured
 
 LAFAN1 with 4096 envs on one L40S and one seed. An update round takes 147 ms with the defaults and 300 ms with
-SuperMimic's hyperparameters. `evaluate.py` on checkpoints of both (40 clips, randomization on):
+the paper's values ([Options](#options)). `evaluate.py` on checkpoints of both (40 clips, randomization on):
 
 | Options | Iterations | Training time | Failed clips | MPJPE |
 |---|---|---|---|---|
-| SuperMimic's hyperparameters (#30) | 500 | 10 min | 8 | 44.7 mm |
-| SuperMimic's hyperparameters (#30) | 1000 | 20 min | 5 | 28.5 mm |
+| paper values | 500 | 10 min | 8 | 44.7 mm |
+| paper values | 1000 | 20 min | 5 | 28.5 mm |
 | defaults | 300 | 3 min | 8 | 34.0 mm |
 | defaults | 500 | 5 min | 8 | 29.2 mm |
 | defaults | 1000 | 10 min | 3 | 24.8 mm |
@@ -74,12 +74,12 @@ On BONES-SEED (129,513 clips), same GPU and env count, one seed, on 2,000 clips 
 
 | Options | Iterations | Training time | Failed clips | MPJPE |
 |---|---|---|---|---|
-| SuperMimic's hyperparameters (#30) | 2000 | 40 min | 5 | 24.2 mm |
+| paper values | 2000 | 40 min | 5 | 24.2 mm |
 | defaults | 500 | 5 min | 7 | 26.0 mm |
 | defaults | 1000 | 10 min | 4 | 24.4 mm |
 | defaults | 2000 | 20 min | 2 | 22.9 mm |
 
-Training time is that many iterations at 0.6 s for the defaults and 1.2 s for SuperMimic's hyperparameters, without
+Training time is that many iterations at 0.6 s for the defaults and 1.2 s for the paper's values, without
 startup. The failed-clip count moves by a few clips from one checkpoint to the next and, on BONES-SEED, by about
 two between evaluations of one checkpoint. Time per round varies by a few percent between nodes of the same GPU
 model.
