@@ -1,12 +1,13 @@
-"""``mochi_fold_the_shirt``: two YAMs fold a ClothDojo T-shirt from its benchmark's fold starts, scored by its fold quality.
+"""``mochi_fold_the_shirt``: two YAMs fold a ClothDojo T-shirt from its benchmark's starts, scored by its fold quality.
 
 Eden's version of ClothDojo's ``shirt_fold`` task (clothdojo.github.io, arXiv 2611.01190) for one of its garments,
 ``rand_ZZCWITH5HY`` (GarmentCodeData, 6888 vertices, 0.78 x 0.51 m laid flat; here at 0.7 of that), on the Mochi
 solver. Each episode starts from one of the garment's four benchmark fold starts
 (``benchmark/conditions/nocs-fold``: the shirt settled flat, sleeves out, at 0, 90, 180 and 270 degrees), and
 success is ClothDojo's fold quality Q (:class:`~eden.tasks.mochi.custom_terms.shirt.ShirtFoldQuality`, its five
-geometric features and linear model) at or above the threshold, with the shirt at rest and both hands clear of it. ClothDojo also asks Q to hold for
-3 s; here "at rest and let go" stands in for that hold, as in ``mochi_fold_the_towel``.
+geometric features and linear model) at or above the threshold, with the shirt at rest and both hands clear of it.
+ClothDojo also asks Q to hold for 3 s; here "at rest and let go" stands in for that hold, as in
+``mochi_fold_the_towel``.
 
 The shirt is ClothDojo's garment at 0.7 of its size (``SHIRT_SCALE``: 0.55 x 0.36 m laid flat, a child's
 T-shirt), laid 19 cm nearer the arms than ClothDojo lays it (``SHIRT_OFFSET``). ClothDojo's Pipers fold an adult's
@@ -14,9 +15,10 @@ shirt; the YAMs at 3 cm over the bench reach about 0.10 m past the bench's middl
 across the centre line, so at full size and ClothDojo's place even a half fold, hem to shoulders, is out of reach
 (the hem would travel from x = -0.14 m to +0.36 m). At this size and place the 270-degree start (hem toward the
 arms) spans x = -0.25 to +0.10 m and y = +/-0.27 m, and folding it in thirds along its length (sleeves in, then the
-hem up twice; ``examples/recipes/mochi/fold_the_shirt_routine.py``) is within reach. The starts and flat reference come
-from ``examples/recipes/mochi/convert_clothdojo_shirt.py`` at full size, in ClothDojo's world; the reset and the
-metric scale them in the plane (``planar_scale``) and shift them onto the bench by ``SHIRT_OFFSET``.
+hem up twice; the task's scripted demonstrator, ``eden.tasks.mochi.scripted_demos``) is within reach. The starts and
+flat reference come from ``examples/recipes/mochi/convert_clothdojo_shirt.py`` at full size, in ClothDojo's world;
+the reset and the metric scale them in the plane (``planar_scale``) and shift them onto the bench by
+``SHIRT_OFFSET``.
 
 Both arms act. Each moves its tool centre by differential IK with its tilt held pointing down, turns it about the
 vertical, and closes its jaws

@@ -1,4 +1,4 @@
-"""The scripted shirt fold of ``fold_the_shirt_routine.py``, path traced by Nyx in a kitchen.
+"""The scripted shirt fold of ``mochi_fold_the_shirt``, path traced by Nyx in a kitchen.
 
 ---
 tier: recipe
@@ -8,11 +8,11 @@ optional_deps: [nyx]
 run: uv run python examples/recipes/mochi/fold_the_shirt_nyx.py
 ---
 
-The task, the fold and every move are ``fold_the_shirt_routine.py``'s: two YAMs fold the ``mochi_fold_the_shirt``
-T-shirt in thirds through the task's own actions, driven by the task's scripted demonstrator
-(:class:`~eden.tasks.mochi.scripted_demos.ShirtFolder`). Read those for what the arms do. What differs is the look. The
-workcell stands on the table of LIBERO's kitchen (its floor, walls, counter, stove and fridge), and the recording
-camera is a Nyx path-tracer sensor lit by a ceiling lamp and a window light.
+The fold is the task's scripted demonstrator, the one ``eden datagen --task mochi_fold_the_shirt`` records
+(:class:`~eden.tasks.mochi.scripted_demos.ShirtFolder`; its module docstring has the plan): two YAMs fold the T-shirt
+in thirds through the task's own actions, here in one env from the benchmark's 270-degree fold start (sleeves pointing
+at the arms, hem toward the robot). The workcell stands on the table of LIBERO's kitchen (its floor, walls, counter,
+stove and fridge), and the recording camera is a Nyx path-tracer sensor lit by a ceiling lamp and a window light.
 
 The kitchen is scenery: a fixed Mochi body with collision off, so it never moves and nothing touches it. Its table top
 lies at the bench's height and stands in for the bench in the picture; the bench plane still carries the arms and the
@@ -22,7 +22,9 @@ solver at a time and does not know the Mochi solver either, so a Mochi scene wou
 move: ``_nyx.py`` bridges the two and is installed before the scene is built.
 
 Rendering costs per frame, not per step: one frame per control step at the control rate, about 1400 frames for the
-whole fold. ``--spp`` trades noise for time.
+whole fold. ``--spp`` trades noise for time. ``--seed`` draws the fold's pace and grasp jitter; the solve is not
+deterministic on the GPU either, so two runs fold a little differently. It prints the fold quality when the fold
+ends.
 
 Usage:
     uv run python examples/recipes/mochi/fold_the_shirt_nyx.py
@@ -34,8 +36,12 @@ import os
 from typing import ClassVar
 
 import genesis as gs
+import torch
 
 import eden as en  # must be imported before genesis / torch
+
+# The 270-degree fold start: sleeves along y, hem toward the arms.
+START = 3
 
 # Where the camera stands and what it looks at, and its vertical field of view (deg): in front of the table and to
 # the right, the shirt in the middle of the frame, the arms behind it and the kitchen's counter behind them.
@@ -114,21 +120,29 @@ def main():
     en.init(backend=gs.gpu)
 
     import _nyx
-    from fold_the_shirt_routine import build, play
 
+    from eden.envs.base import RLEnvBase
     from eden.options import CamerasOptions
     from eden.tasks import TASK_REGISTRY
+    from eden.tasks.mochi.scripted_demos import ShirtFolder
 
     _nyx.install()  # teach the plugin about the Mochi solver, before the scene is built
 
     config = TASK_REGISTRY.build("mochi_fold_the_shirt")
+    config.env_options.num_envs = 1
+    config.event_options.fold_start.state_indices = [START]
+    # The fold runs to its own end: no time limit, and no reset before the measures are read.
+    for name in config.termination_options.term_keys():
+        config.termination_options.disable_term(name)
     # The kitchen's table top is the bench in the picture; the bench plane still carries the arms and the shirt.
     config.scene_options.plane.visualization = False
     config.scene_options.kitchen = kitchen()
     config.scene_options.shirt.surface = SHIRT
     config.cameras_options = CamerasOptions(rec=nyx_camera(tuple(args.res), args.spp))
 
-    env = build(config)
+    env = RLEnvBase.from_config(config)
+    env.build()
+    env.reset()
     camera = env.cameras["rec"]
     os.makedirs(args.output_dir, exist_ok=True)
     # A smoke run records a few frames: under a name of its own, so it never replaces a full render.
@@ -136,7 +150,20 @@ def main():
     path = os.path.join(args.output_dir, f"mochi_fold_the_shirt_nyx{'_smoke' if smoke else ''}.mp4")
     camera.start_recording(path, fps=1.0 / env.dt)
     try:
-        play(env, camera, seed=args.seed, still_s=0.0 if smoke else 1.0)  # a still beat before the arms move
+        # A zero action holds each hand where it is, its jaws open: a still beat before the arms move (and the whole of
+        # a smoke run).
+        still = torch.zeros(1, env.action_manager.total_action_dim, device=gs.device)
+        for _ in range(5 if smoke else round(1.0 / env.dt)):
+            env.step(still)
+            camera.render_rgb()
+        if not smoke:
+            folder = ShirtFolder(env, seed=args.seed)
+            while not bool(folder.update_subgoals().all()):
+                env.step(folder.act())
+                camera.render_rgb()
+            quality = env.metric_manager.get_term("fold_quality")
+            q = quality._quality.score(quality._quality.features(env.entities["shirt"].get_vertex_positions()))
+            print(f"fold quality {float(q[0]):+.3f} (succeeds at {quality.success_threshold:+.3f})")
     finally:
         camera.stop_recording()
         print(f"Saved video to {path}")

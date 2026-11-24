@@ -101,7 +101,8 @@ Q to hold for 3 s; "at rest and let go" stands in for that hold, as for the towe
 
 The threshold was checked on Mochi rather than refitted. Eight frames of ClothDojo's published expert fold, scaled
 like the task's starts and laid into its scene, were settled for 4 s. Seven settled at Q +0.19 to +1.14, all above
-the threshold (change -0.09 to +0.54, mean +0.21), so it is kept; one frame's solve diverged. `examples/recipes/mochi/fold_the_shirt_threshold.py` reruns the measurement.
+the threshold (change -0.09 to +0.54, mean +0.21), so it is kept; one frame's solve diverged.
+`examples/recipes/mochi/fold_the_shirt_threshold.py` reruns the measurement.
 
 The task's scripted demonstrator, `ShirtFolder` (`eden/tasks/mochi/scripted_demos.py`), folds the sleeves in and
 then the length in thirds with both YAMs, through the task's own actions. `eden datagen` records it from the two
@@ -113,8 +114,8 @@ eden datagen --task mochi_fold_the_shirt --num_envs 16 \
 ```
 
 It does not reach the task's success: its final fold quality runs about -0.9 to -2.3, held back by a lumpy top
-(the planar-top feature) and by sleeve folds that sometimes slip. `examples/recipes/mochi/fold_the_shirt_routine.py`
-plays it in one env, and `fold_the_shirt_nyx.py` path traces it in LIBERO's kitchen.
+(the planar-top feature) and by sleeve folds that sometimes slip. `eden datagen --show_viewer` shows it as it records,
+and `examples/recipes/mochi/fold_the_shirt_nyx.py` path traces it in LIBERO's kitchen.
 
 The garment's files are converted from ClothDojo's Hub dataset by `examples/recipes/mochi/convert_clothdojo_shirt.py`
 into `objects/clothdojo/rand_ZZCWITH5HY/` of Eden's asset dataset: the mesh (`shirt.obj`, in the USD's vertex order)
