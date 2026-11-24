@@ -28,17 +28,15 @@ def _update_rounds_per_env_step(cfg) -> float:
     return cfg.env_options.num_envs / windows * runner.replay_ratio
 
 
-def test_the_default_recipe_is_the_learners_own_options():
+def test_the_task_trains_with_the_learners_default_options():
     from eden.learning.wrappers.rsl_rl.supermimic import SuperMimicRunnerOptions
 
+    assert TASK_REGISTRY.build("supermimic").runner_options == SuperMimicRunnerOptions(experiment_name="supermimic")
+
+
+def test_the_defaults_are_blinkmimics_recipe_at_the_papers_update_rate():
     cfg = TASK_REGISTRY.build("supermimic")
-    assert cfg.runner_options == SuperMimicRunnerOptions(experiment_name="supermimic")
-    assert TASK_REGISTRY.build("supermimic", recipe="supermimic").runner_options == cfg.runner_options
-
-
-def test_the_blinkmimic_recipe_turns_on_its_learner_options_at_the_same_update_rate():
-    cfg = TASK_REGISTRY.build("supermimic", recipe="blinkmimic")
-    runner, default = cfg.runner_options, TASK_REGISTRY.build("supermimic")
+    runner = cfg.runner_options
     world_model, policy, sampler = runner.world_model, runner.policy, runner.return_sampler
     assert (world_model.hidden_dims, world_model.num_batches, world_model.lr) == ((1024, 1024, 1024), 5, 4e-4)
     assert world_model.mirror_share == 0.5
@@ -46,27 +44,7 @@ def test_the_blinkmimic_recipe_turns_on_its_learner_options_at_the_same_update_r
     assert (policy.lr_decay_return, policy.lr_decay_deadline, policy.lr_decay_iterations) == (0.75, 350, 75)
     assert (policy.ema_decay, policy.reference_action) == (0.995, True)
     assert _update_rounds_per_env_step(cfg) == pytest.approx(0.4)
-    assert _update_rounds_per_env_step(cfg) == pytest.approx(_update_rounds_per_env_step(default))
-    # 30% of the resets before falls; explore, focus and keep share the rest as in the default recipe.
+    # 30% of the resets before falls; explore, focus and keep split the rest 0.5 / 0.4 / 0.1, as in the paper.
     focus = 1.0 - sampler.explore - sampler.keep - sampler.failure
     assert sampler.failure == 0.3
     assert (sampler.explore / 0.7, focus / 0.7, sampler.keep / 0.7) == pytest.approx((0.5, 0.4, 0.1))
-    # The recipe changes the learner only.
-    for field in ("env_options", "reward_options", "termination_options", "event_options", "observation_options"):
-        assert getattr(cfg, field) == getattr(default, field)
-
-
-def test_the_recipe_is_a_command_line_flag_of_the_task():
-    from eden.tasks.parser import get_task_argparser
-
-    argv = ["--task", "supermimic", "--recipe", "blinkmimic"]
-    args = get_task_argparser("train", argv=argv).parse_args(argv)
-    assert args.recipe == "blinkmimic"
-    with pytest.raises(ValueError, match="recipe"):
-        TASK_REGISTRY.build("supermimic", recipe="instanttrack")
-
-
-def test_the_graded_phase_replays_from_a_cuda_graph_where_there_is_one():
-    options = TASK_REGISTRY.build("supermimic").env_options.cuda_graph_options
-    # The suite builds the task on a CPU device, where the phase runs eagerly.
-    assert options is not None and not options.require_cuda

@@ -1,12 +1,15 @@
 """The SuperMimic runner on the supermimic task: its world model grades as the simulator does, and it trains."""
 
+import pathlib
+import re
+
 import pytest
 import torch
 
 from eden.envs.wrappers.rsl_rl_env import RslRlVecEnvWrapper, make_rsl_rl_runner
 from eden.learning.wrappers.rsl_rl.supermimic.runner import SuperMimicRunner
 from eden.learning.wrappers.rsl_rl.supermimic.world_model_env import reference_action, sample_starts
-from tests.learning.wrappers.rsl_rl.supermimic.conftest import small_learner
+from tests.learning.wrappers.rsl_rl.supermimic.conftest import paper_learner, small_learner
 from tests.support.supermimic import supermimic_config, write_lafan1_library
 
 pytestmark = [pytest.mark.requires_genesis]
@@ -18,9 +21,10 @@ def library(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def runner(library, tmp_path_factory):
-    env = RslRlVecEnvWrapper.from_config(small_learner(supermimic_config(library)))
-    return make_rsl_rl_runner(env, log_dir=str(tmp_path_factory.mktemp("run")))
+def paper_runner(library, tmp_path_factory):
+    """A runner with the recipe's options off (:func:`paper_learner`)."""
+    env = RslRlVecEnvWrapper.from_config(paper_learner(small_learner(supermimic_config(library))))
+    return make_rsl_rl_runner(env, log_dir=str(tmp_path_factory.mktemp("paper")))
 
 
 def test_the_generic_factory_builds_the_runner_without_training_state(runner):
@@ -43,20 +47,37 @@ def test_the_world_model_reward_and_termination_grade_a_real_transition_as_the_t
         torch.testing.assert_close(wm_reward[kept], reward[kept], atol=1e-5, rtol=1e-4)
 
 
-def test_it_trains_and_a_checkpoint_restores_the_policy(runner, tmp_path):
+def test_it_trains_and_a_checkpoint_restores_the_averaged_policy(runner, tmp_path):
     runner.learn(num_learning_iterations=3)
     assert runner.current_learning_iteration == 3
     assert runner.replay_buffer.num_transitions == 12
     path = str(tmp_path / "model_3.pt")
     runner.save(path)
     obs = runner.env.get_observations()
-    policy = runner.get_inference_policy()
-    before = policy(obs)
-    for p in runner.actor.parameters():
+    before = runner.get_inference_policy()(obs)
+    for p in runner.actor_ema.parameters():
         p.data.add_(1.0)
+    assert (runner.get_inference_policy()(obs) - before).abs().max() > 1e-3
     runner.load(path)
     torch.testing.assert_close(runner.get_inference_policy()(obs), before)
     assert runner.current_learning_iteration == 3
+    assert runner.policy_learner.average_started
+
+
+def test_with_the_recipes_options_off_it_trains_and_a_checkpoint_restores_the_actor(paper_runner, tmp_path):
+    runner = paper_runner
+    assert (runner.actor_ema, runner.policy_learner.lr_scale, runner.world_model_learner.mirror) == (None, None, None)
+    runner.learn(num_learning_iterations=3)
+    assert runner.sampler.fall_rate.sum() == 0.0
+    path = str(tmp_path / "model_3.pt")
+    runner.save(path)
+    obs = runner.env.get_observations()
+    before = runner.get_inference_policy()(obs)
+    for p in runner.actor.parameters():
+        p.data.add_(1.0)
+    assert (runner.get_inference_policy()(obs) - before).abs().max() > 1e-3
+    runner.load(path)
+    torch.testing.assert_close(runner.get_inference_policy()(obs), before)
 
 
 def test_a_collected_step_acts_on_the_statistics_before_it_and_folds_itself_in_once(runner):
@@ -408,24 +429,7 @@ def _clone_state(module):
     return {key: value.clone() for key, value in module.state_dict().items()}
 
 
-def test_the_blinkmimic_recipe_trains_and_a_checkpoint_restores_the_averaged_policy(blinkmimic_runner, tmp_path):
-    runner = blinkmimic_runner
-    runner.learn(num_learning_iterations=2)
-    assert runner.current_learning_iteration == 2
-    path = str(tmp_path / "model_2.pt")
-    runner.save(path)
-    obs = runner.env.get_observations()
-    before = runner.get_inference_policy()(obs)
-    for p in runner.actor_ema.parameters():
-        p.data.add_(1.0)
-    assert (runner.get_inference_policy()(obs) - before).abs().max() > 1e-3
-    runner.load(path)
-    torch.testing.assert_close(runner.get_inference_policy()(obs), before)
-    assert runner.policy_learner.average_started
-
-
-def test_replay_runs_the_average_of_the_actor_and_collection_the_actor(blinkmimic_runner):
-    runner = blinkmimic_runner
+def test_replay_runs_the_average_of_the_actor_and_collection_the_actor(runner):
     obs = runner.env.get_observations()
     replayed = runner.get_inference_policy()(obs)
     kept = _clone_state(runner.actor)
@@ -440,8 +444,7 @@ def test_replay_runs_the_average_of_the_actor_and_collection_the_actor(blinkmimi
         runner.actor.load_state_dict(kept)
 
 
-def test_an_actor_step_moves_the_average_by_one_minus_the_decay(blinkmimic_runner):
-    runner = blinkmimic_runner
+def test_an_actor_step_moves_the_average_by_one_minus_the_decay(runner):
     runner.learn(num_learning_iterations=1)
     policy = runner.options.policy
     average = _clone_state(runner.actor_ema)
@@ -459,8 +462,7 @@ def test_an_actor_step_moves_the_average_by_one_minus_the_decay(blinkmimic_runne
     assert max(moved) > 0  # the step changed the actor, so the comparison above had a difference to miss
 
 
-def test_a_checkpoint_without_the_average_starts_it_from_the_actor(blinkmimic_runner, tmp_path):
-    runner = blinkmimic_runner
+def test_a_checkpoint_without_the_average_starts_it_from_the_actor(runner, tmp_path):
     path = str(tmp_path / "model.pt")
     runner.save(path)
     checkpoint = torch.load(path, weights_only=False)
@@ -474,44 +476,84 @@ def test_a_checkpoint_without_the_average_starts_it_from_the_actor(blinkmimic_ru
     assert not runner.policy_learner.average_started
 
 
-def test_a_checkpoint_written_before_the_new_options_loads_in_the_default_runner(runner, tmp_path):
-    path = str(tmp_path / "model.pt")
+def _write_as_before_the_recipes_options(runner, path):
+    """A checkpoint of ``runner`` without the entries the recipe's options added, as the first release wrote it."""
     runner.save(path)
-    obs = runner.env.get_observations()
-    before = runner.get_inference_policy()(obs)
     checkpoint = torch.load(path, weights_only=False)
     del checkpoint["actor_ema"], checkpoint["lr_decay_start"], checkpoint["return_sampler"]["fall_rate"]
     del checkpoint["layout"]["runner_options.policy.reference_action"]
     torch.save(checkpoint, path)
+
+
+def test_a_checkpoint_written_before_the_recipes_options_loads_with_them_off(paper_runner, tmp_path):
+    runner, path = paper_runner, str(tmp_path / "model.pt")
+    obs = runner.env.get_observations()
+    before = runner.get_inference_policy()(obs)
+    _write_as_before_the_recipes_options(runner, path)
     for p in runner.actor.parameters():
         p.data.add_(1.0)
     runner.load(path)
     torch.testing.assert_close(runner.get_inference_policy()(obs), before)
-    assert runner.actor_ema is None
 
 
-def test_a_checkpoint_trained_without_the_reference_action_is_refused_by_a_runner_with_it(
-    runner, blinkmimic_runner, tmp_path
+def test_a_checkpoint_trained_without_the_reference_action_is_refused_with_the_override_that_loads_it(
+    paper_runner, runner, tmp_path
 ):
     path = str(tmp_path / "model.pt")
-    runner.save(path)
-    message = r"runner_options.policy.reference_action: checkpoint False, this run True"
+    message = (
+        r"runner_options.policy.reference_action: checkpoint False, this run True\)\. To load it, set the options "
+        r"it trained with: --override '\{runner_options: \{policy: \{reference_action: false\}\}\}'"
+    )
+    paper_runner.save(path)
     with pytest.raises(ValueError, match=message):
-        blinkmimic_runner.load(path)
-    checkpoint = torch.load(path, weights_only=False)
-    del checkpoint["layout"]["runner_options.policy.reference_action"]  # written before the option existed
-    torch.save(checkpoint, path)
+        runner.load(path)
+    _write_as_before_the_recipes_options(paper_runner, path)
     with pytest.raises(ValueError, match=message):
-        blinkmimic_runner.load(path)
+        runner.load(path)
 
 
-def test_a_checkpoint_with_an_average_warns_a_runner_that_keeps_none(runner, blinkmimic_runner, tmp_path, eden_caplog):
+def test_a_run_config_written_before_the_recipes_options_replays_under_the_override_the_error_names(
+    paper_runner, library, tmp_path
+):
+    """Such a config lacks the recipe's options, which take today's defaults when it is loaded."""
+    import json
+
+    from eden.utils.configs import EdenConfig, overrides_from_str
+
+    checkpoint, saved = str(tmp_path / "model.pt"), str(tmp_path / "config.json")
+    _write_as_before_the_recipes_options(paper_runner, checkpoint)
+    paper_learner(small_learner(supermimic_config(library))).save_as_file(saved)
+    data = json.loads(pathlib.Path(saved).read_text())
+    options = data["config"]["runner_options"]
+    for group, names in {
+        "policy": ("ema_decay", "reference_action", "lr_multiplier", "lr_decay_return", "lr_decay_deadline"),
+        "world_model": ("mirror_share",),
+        "return_sampler": ("failure", "failure_lead_s"),
+    }.items():
+        for name in names:
+            del options[group][name]
+    pathlib.Path(saved).write_text(json.dumps(data))
+
+    cfg = EdenConfig.load_from_file(saved)
+    assert cfg.runner_options.policy.reference_action
+    with pytest.raises(ValueError) as error:
+        make_rsl_rl_runner(RslRlVecEnvWrapper.from_config(cfg), checkpoint=checkpoint, for_inference=True)
+    override = re.search(r"--override '([^']*)'", str(error.value)).group(1)
+    assert override == "{runner_options: {policy: {reference_action: false}}}"
+    cfg = EdenConfig.load_from_file(saved).with_overrides_from_dict(overrides_from_str(override))
+    replayed = make_rsl_rl_runner(RslRlVecEnvWrapper.from_config(cfg), checkpoint=checkpoint, for_inference=True)
+    # It replays the checkpoint's actor: the average this config keeps starts from it.
+    for key, value in paper_runner.actor.state_dict().items():
+        torch.testing.assert_close(replayed.actor_ema.state_dict()[key], value)
+
+
+def test_a_checkpoint_with_an_average_warns_a_runner_that_keeps_none(paper_runner, runner, tmp_path, eden_caplog):
     path = str(tmp_path / "model.pt")
-    runner.save(path)
+    paper_runner.save(path)
     checkpoint = torch.load(path, weights_only=False)
     checkpoint["actor_ema"] = checkpoint["actor"]
     torch.save(checkpoint, path)
-    runner.load(path)
+    paper_runner.load(path)
     assert "holds an average of the actor" in eden_caplog.text
     assert "runner_options.policy.ema_decay=0" in eden_caplog.text
 
@@ -522,10 +564,7 @@ def _zero_decoder_output(actor):
     last.bias.data.zero_()
 
 
-def test_a_zero_network_output_commands_the_next_reference_pose_in_replay_collection_and_imagination(
-    blinkmimic_runner,
-):
-    runner = blinkmimic_runner
+def test_a_zero_network_output_commands_the_next_reference_pose_in_replay_collection_and_imagination(runner):
     runner.learn(num_learning_iterations=1)
     library, dynamics = runner.motion.library, runner.dynamics
     kept = _clone_state(runner.actor), _clone_state(runner.actor_ema)
@@ -558,13 +597,12 @@ def test_a_zero_network_output_commands_the_next_reference_pose_in_replay_collec
         runner.actor_ema.load_state_dict(kept[1])
 
 
-def test_the_reference_action_is_recorded_in_the_checkpoint_layout(runner, blinkmimic_runner):
-    assert runner._layout()["runner_options.policy.reference_action"] is False
-    assert blinkmimic_runner._layout()["runner_options.policy.reference_action"] is True
+def test_the_reference_action_is_recorded_in_the_checkpoint_layout(paper_runner, runner):
+    assert paper_runner._layout()["runner_options.policy.reference_action"] is False
+    assert runner._layout()["runner_options.policy.reference_action"] is True
 
 
-def test_the_normalized_return_is_the_mean_step_reward_of_ended_episodes_over_the_largest(blinkmimic_runner):
-    runner = blinkmimic_runner
+def test_the_normalized_return_is_the_mean_step_reward_of_ended_episodes_over_the_largest(runner):
     runner._take_normalized_return()
     runner._episode_reward.zero_()
     runner._episode_steps.zero_()
@@ -582,8 +620,8 @@ def test_the_normalized_return_is_the_mean_step_reward_of_ended_episodes_over_th
     assert runner._take_normalized_return() == pytest.approx(expected)
 
 
-def test_the_learning_rate_ramp_starts_when_the_return_reaches_its_threshold(blinkmimic_runner):
-    runner, policy = blinkmimic_runner, blinkmimic_runner.options.policy
+def test_the_learning_rate_ramp_starts_when_the_return_reaches_its_threshold(runner):
+    policy = runner.options.policy
     assert (policy.lr_multiplier, policy.lr_decay_return, policy.lr_decay_iterations) == (4.0, 0.75, 75)
     started = runner._lr_decay_start  # training in an earlier test may have started the ramp
     runner._lr_decay_start = None
@@ -601,7 +639,7 @@ def test_the_learning_rate_ramp_starts_when_the_return_reaches_its_threshold(bli
 def test_the_learning_rate_ramp_starts_at_its_deadline_and_survives_a_resume(library, tmp_path):
     cfg = small_learner(supermimic_config(library))
     policy = cfg.runner_options.policy
-    policy.lr_multiplier, policy.lr_decay_deadline, policy.lr_decay_iterations = 4.0, 1, 2
+    policy.lr_decay_return, policy.lr_decay_deadline, policy.lr_decay_iterations = None, 1, 2
     env = RslRlVecEnvWrapper.from_config(cfg)
     runner = make_rsl_rl_runner(env, log_dir=str(tmp_path))
     runner.learn(num_learning_iterations=3)
@@ -618,7 +656,6 @@ def test_the_learning_rate_ramp_starts_at_its_deadline_and_survives_a_resume(lib
 def test_a_foot_randomized_on_one_side_only_cannot_be_mirrored(library):
     cfg = small_learner(supermimic_config(library))
     cfg.env_options.num_envs = 2
-    cfg.runner_options.world_model.mirror_share = 0.5
     cfg.event_options.foot_friction.links_name = ["left_ankle_roll_link"]
     env = RslRlVecEnvWrapper.from_config(cfg)
     with pytest.raises(
@@ -630,7 +667,6 @@ def test_a_foot_randomized_on_one_side_only_cannot_be_mirrored(library):
 def test_a_lateral_offset_randomized_off_centre_cannot_be_mirrored(library):
     cfg = small_learner(supermimic_config(library))
     cfg.env_options.num_envs = 2
-    cfg.runner_options.world_model.mirror_share = 0.5
     cfg.event_options.base_com.com_shift_y_range = (0.0, 0.05)
     env = RslRlVecEnvWrapper.from_config(cfg)
     with pytest.raises(
@@ -642,9 +678,9 @@ def test_a_lateral_offset_randomized_off_centre_cannot_be_mirrored(library):
 def test_an_untrained_actor_with_the_reference_action_commands_nearly_the_reference_pose(library):
     cfg = small_learner(supermimic_config(library))
     cfg.env_options.num_envs = 2
-    cfg.runner_options.policy.reference_action = True
     env = RslRlVecEnvWrapper.from_config(cfg)
     runner = make_rsl_rl_runner(env)
+    assert runner.options.policy.reference_action
     state, sensor, frames, _ = runner._observe(env.get_observations())
     actor_in = runner._policy_input(state, sensor, frames, training=False)
     correction = runner.actor(actor_in, interface="motion") - actor_in["reference_action"]

@@ -14,10 +14,9 @@ Each clip gets one env, which starts on the clip's first frame without reset noi
 over each clip's steps: the mean per-body position error of the tracked bodies relative to the root (MPJPE, mm) and
 the mean joint angle error (rad). Randomization of friction, centre of mass and encoder bias stays as in training.
 The task and learner options are the run's own, read from the ``config.json`` beside the checkpoint, so a run trained
-with ``--recipe blinkmimic`` or with ``--override`` evaluates as it trained. The library flags (``--dataset``,
-``--raw-data-path``, ``--processed-data-path``, ``--clip-list``) replace the run's library as a set: pass none to play
-the clips the run trained on. A checkpoint with no ``config.json`` beside it builds the task anew and takes
-``--recipe``.
+with ``--override`` evaluates as it trained; a checkpoint with no ``config.json`` beside it builds the task anew.
+``--override`` layers onto either. The library flags (``--dataset``, ``--raw-data-path``, ``--processed-data-path``,
+``--clip-list``) replace the run's library as a set: pass none to play the clips the run trained on.
 
 Usage::
 
@@ -46,10 +45,10 @@ def main() -> None:
     parser.add_argument("--processed-data-path", type=str, default=None, help="Cache of the prepared library.")
     parser.add_argument("--clip-list", type=str, default=None, help="Clips to play (.json/.yaml list).")
     parser.add_argument(
-        "--recipe",
-        type=str,
-        default=None,
-        help="Recipe of a checkpoint with no config.json beside it: supermimic or blinkmimic.",
+        "--override",
+        action="append",
+        default=[],
+        help="Inline YAML mapping layered onto the config, e.g. 'runner_options: {policy: {ema_decay: 0}}'.",
     )
     parser.add_argument("-b", "--num-envs", type=int, default=64, help="Envs, at least one per clip.")
     parser.add_argument("-o", "--output", type=str, default=None, help="Per-clip results (.json).")
@@ -60,7 +59,7 @@ def main() -> None:
     from eden.envs.wrappers.rsl_rl_env import RslRlVecEnvWrapper, make_rsl_rl_runner
     from eden.tasks import TASK_REGISTRY
     from eden.tasks.supermimic.config import TRACKED_LINKS, SuperMimicConfig, SuperMimicDataMod
-    from eden.utils.configs import EdenConfig
+    from eden.utils.configs import EdenConfig, overrides_from_str
 
     library = {
         "dataset": args.dataset,
@@ -71,11 +70,6 @@ def main() -> None:
     library = {flag: value for flag, value in library.items() if value is not None}
     saved = os.path.join(os.path.dirname(os.path.abspath(args.checkpoint)), "config.json")
     if os.path.exists(saved):
-        if args.recipe is not None:
-            raise SystemExit(
-                f"--recipe {args.recipe} cannot apply: {saved} holds the learner options this checkpoint trained "
-                "with. Drop --recipe."
-            )
         cfg = EdenConfig.load_from_file(saved)
         if not isinstance(cfg, SuperMimicConfig):
             raise SystemExit(f"{saved} is a {type(cfg).__name__}, not the supermimic task's config.")
@@ -83,8 +77,9 @@ def main() -> None:
         if library:
             cfg = SuperMimicDataMod(**library).apply(cfg)
     else:
-        recipe = {} if args.recipe is None else {"recipe": args.recipe}
-        cfg = TASK_REGISTRY.build("supermimic", **library, **recipe)
+        cfg = TASK_REGISTRY.build("supermimic", **library)
+    for text in args.override:
+        cfg = cfg.with_overrides_from_dict(overrides_from_str(text), source="--override")
     rsi = cfg.event_options.reset_from_motion
     rsi.pose_range, rsi.velocity_range, rsi.dofs_position_range = {}, {}, (0.0, 0.0)
     cfg.motion_options.default.reset_sampling = "clip_start"

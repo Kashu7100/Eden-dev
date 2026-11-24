@@ -27,10 +27,21 @@ def env(supermimic_env):
     return supermimic_env
 
 
+def paper_learner(cfg):
+    """``cfg`` with the options that default to BlinkMimic's recipe at the SuperMimic paper's values: no actor
+    average, reference action, mirrored batches, failure resets or learning-rate multiplier.
+    """
+    o = cfg.runner_options
+    o.policy.ema_decay, o.policy.reference_action, o.policy.lr_multiplier = 0.0, False, 1.0
+    o.world_model.mirror_share = 0.0
+    o.return_sampler.failure, o.return_sampler.explore, o.return_sampler.keep = 0.0, 0.5, 0.1
+    return cfg
+
+
 @pytest.fixture(scope="module")
-def blinkmimic_runner(supermimic_library, tmp_path_factory):
-    """A runner of the task under ``--recipe blinkmimic``: every learner option the recipe turns on, small networks."""
+def runner(supermimic_library, tmp_path_factory):
+    """A runner of the task's default options, with small networks."""
     from eden.envs.wrappers.rsl_rl_env import RslRlVecEnvWrapper, make_rsl_rl_runner
 
-    cfg = small_learner(supermimic_config(supermimic_library, recipe="blinkmimic"))
-    return make_rsl_rl_runner(RslRlVecEnvWrapper.from_config(cfg), log_dir=str(tmp_path_factory.mktemp("blinkmimic")))
+    cfg = small_learner(supermimic_config(supermimic_library))
+    return make_rsl_rl_runner(RslRlVecEnvWrapper.from_config(cfg), log_dir=str(tmp_path_factory.mktemp("run")))

@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import torch
+import yaml
 from tensordict import TensorDict
 
 import eden as en
@@ -47,6 +48,18 @@ if TYPE_CHECKING:
 #: Entries of the layout record (:meth:`_SuperMimicRunner._layout`) that checkpoints written before the entry
 #: existed lack, with the value those checkpoints were trained with.
 _LAYOUT_DEFAULTS = {"runner_options.policy.reference_action": False}
+
+
+def _override(options: dict[str, Any]) -> str:
+    """``options``, keyed by dotted path, as the inline mapping ``--override`` takes."""
+    nested: dict[str, Any] = {}
+    for path, value in sorted(options.items()):
+        *parents, leaf = path.split(".")
+        node = nested
+        for parent in parents:
+            node = node.setdefault(parent, {})
+        node[leaf] = list(value) if isinstance(value, tuple) else value
+    return yaml.safe_dump(nested, default_flow_style=True, width=1_000_000).strip()
 
 
 class _UpdateRatio:
@@ -613,10 +626,11 @@ class _SuperMimicRunner:
                 if saved_layout.get(key) != layout.get(key)
             }
             detail = "; ".join(f"{key}: checkpoint {a!r}, this run {b!r}" for key, (a, b) in sorted(differ.items()))
+            trained = {key: a for key, (a, _) in differ.items() if key.startswith("runner_options.")}
+            fix = f" To load it, set the options it trained with: --override '{_override(trained)}'." if trained else ""
             raise ValueError(
-                f"{path} was trained with other network inputs or sizes than this runner builds ({detail}). The "
-                "runner_options.* entries are options to set; the others follow from the task's robot, tracked "
-                "links and randomization events."
+                f"{path} was trained with other network inputs or sizes than this runner builds ({detail}).{fix} "
+                "Entries outside runner_options follow from the task's robot, tracked links and randomization events."
             )
         if (self.sampler is None) != (checkpoint["return_sampler"] is None) and self.sampler is not None:
             en.logger.warning(

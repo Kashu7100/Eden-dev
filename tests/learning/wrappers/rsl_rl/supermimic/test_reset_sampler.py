@@ -9,8 +9,9 @@ from eden.utils.motion_reference.library import MotionLibrary
 
 
 def _sampler(**options) -> ReturnSampler:
+    """A sampler without the failure share, whose shares are then explore, focus and keep."""
     return ReturnSampler(
-        ReturnSamplerOptions(horizon=4, **options),
+        ReturnSamplerOptions(horizon=4, failure=0.0, **options),
         bin_count=2,
         frame_count=20,
         num_envs=2,
@@ -59,7 +60,8 @@ def test_every_frame_lies_in_the_range_of_the_bin_it_is_scored_in(frame_count, b
 
 def test_a_saved_state_with_another_bin_count_names_both_libraries():
     state = _sampler().state_dict()
-    other = ReturnSampler(ReturnSamplerOptions(horizon=4), 5, 50, num_envs=2, max_step_reward=1.0, device="cpu")
+    options = ReturnSamplerOptions(horizon=4, failure=0.0)
+    other = ReturnSampler(options, 5, 50, num_envs=2, max_step_reward=1.0, device="cpu")
     with pytest.raises(ValueError, match=r"holds 2 reset bins, but this run's motion library has 5 \(50 frames\)"):
         other.load_state_dict(state)
 
@@ -155,9 +157,9 @@ def test_the_failure_share_without_the_library_is_refused():
     with pytest.raises(
         ValueError, match=r"return_sampler.failure=0.3 places resets before falls within the fall's clip"
     ):
-        ReturnSampler(ReturnSamplerOptions(failure=0.3), 12, 120, num_envs=2, max_step_reward=1.0, device="cpu")
+        ReturnSampler(ReturnSamplerOptions(), 12, 120, num_envs=2, max_step_reward=1.0, device="cpu")
 
 
 def test_shares_that_the_failure_share_leaves_no_focus_for_are_refused():
     with pytest.raises(ValueError, match=r"explore \(0.5\) \+ keep \(0.1\) \+ failure \(0.4\) must leave a share"):
-        ReturnSamplerOptions(failure=0.4)
+        ReturnSamplerOptions(explore=0.5, keep=0.1, failure=0.4)

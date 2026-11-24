@@ -58,8 +58,8 @@ def test_context_columns_take_the_other_side_and_the_lateral_offset_its_negative
 
 
 @pytest.fixture(scope="module")
-def mirror(blinkmimic_runner):
-    return blinkmimic_runner.world_model_learner.mirror
+def mirror(runner):
+    return runner.world_model_learner.mirror
 
 
 def _states(runner, count: int = 64) -> torch.Tensor:
@@ -83,21 +83,21 @@ requires_genesis = pytest.mark.requires_genesis
 
 
 @requires_genesis
-def test_mirroring_twice_is_the_identity(blinkmimic_runner, mirror):
-    state = _states(blinkmimic_runner)
+def test_mirroring_twice_is_the_identity(runner, mirror):
+    state = _states(runner)
     torch.testing.assert_close(mirror.state(mirror.state(state)), state, atol=0, rtol=0)
     assert (mirror.state(state) - state).abs().max() > 0.1
-    action = torch.randn(8, blinkmimic_runner.env.num_actions)
+    action = torch.randn(8, runner.env.num_actions)
     torch.testing.assert_close(mirror.action(mirror.action(action)), action, atol=1e-5, rtol=0)
-    context = torch.rand(8, blinkmimic_runner.sim_context.dim) * 2 - 1
+    context = torch.rand(8, runner.sim_context.dim) * 2 - 1
     torch.testing.assert_close(mirror.sim_context(mirror.sim_context(context)), context, atol=1e-6, rtol=0)
 
 
 @requires_genesis
-def test_the_links_of_a_mirrored_state_are_the_mirror_image_of_their_partner_links(blinkmimic_runner, mirror):
+def test_the_links_of_a_mirrored_state_are_the_mirror_image_of_their_partner_links(runner, mirror):
     """Forward kinematics commutes with the mirror, with left and right links swapped."""
-    fk, joints = blinkmimic_runner.motion.fk, blinkmimic_runner.representation.num_joints
-    state = _states(blinkmimic_runner)
+    fk, joints = runner.motion.fk, runner.representation.num_joints
+    state = _states(runner)
     link_perm = torch.tensor(mirror_permutation(fk.link_names, "tracked link"))
     assert link_perm.tolist() != list(range(len(fk.link_names)))
 
@@ -114,10 +114,10 @@ def test_the_links_of_a_mirrored_state_are_the_mirror_image_of_their_partner_lin
 
 
 @requires_genesis
-def test_the_model_state_of_a_mirrored_state_is_the_mirror_image_of_the_model_state(blinkmimic_runner, mirror):
+def test_the_model_state_of_a_mirrored_state_is_the_mirror_image_of_the_model_state(runner, mirror):
     """Root height, and gravity and twist in the root frame: y of a vector and x, z of the angular velocity flip."""
-    rep = blinkmimic_runner.representation
-    state = _states(blinkmimic_runner)
+    rep = runner.representation
+    state = _states(runner)
     z, g_b, v_b, w_b, q, qd = rep.split_rep(rep.represent(state))
     m_z, m_g_b, m_v_b, m_w_b, m_q, m_qd = rep.split_rep(rep.represent(mirror.state(state)))
     flip_y, flip_xz = torch.tensor([1.0, -1.0, 1.0]), torch.tensor([-1.0, 1.0, -1.0])
@@ -130,9 +130,9 @@ def test_the_model_state_of_a_mirrored_state_is_the_mirror_image_of_the_model_st
 
 
 @requires_genesis
-def test_a_mirrored_action_commands_the_mirror_image_of_the_joint_target(blinkmimic_runner, mirror):
-    dynamics = blinkmimic_runner.dynamics
-    action = torch.randn(8, blinkmimic_runner.env.num_actions)
+def test_a_mirrored_action_commands_the_mirror_image_of_the_joint_target(runner, mirror):
+    dynamics = runner.dynamics
+    action = torch.randn(8, runner.env.num_actions)
     torch.testing.assert_close(
         dynamics.target(mirror.action(action)), mirror.joints(dynamics.target(action)), atol=1e-5, rtol=0
     )
@@ -140,9 +140,9 @@ def test_a_mirrored_action_commands_the_mirror_image_of_the_joint_target(blinkmi
 
 @requires_genesis
 def test_a_mirrored_context_swaps_the_feet_and_negates_the_lateral_offset_and_the_bias_of_flipped_joints(
-    blinkmimic_runner, mirror
+    runner, mirror
 ):
-    context = blinkmimic_runner.sim_context
+    context = runner.sim_context
     columns = context.columns
     ctx = torch.rand(4, context.dim) * 2 - 1
     mirrored = mirror.sim_context(ctx)
@@ -162,8 +162,7 @@ def test_a_mirrored_context_swaps_the_feet_and_negates_the_lateral_offset_and_th
 
 
 @requires_genesis
-def test_a_mapping_that_the_kinematics_contradict_is_refused_with_the_link(blinkmimic_runner, mirror):
-    runner = blinkmimic_runner
+def test_a_mapping_that_the_kinematics_contradict_is_refused_with_the_link(runner, mirror):
     limits = runner.representation.soft_joint_pos_limits
     mirror.check_kinematics(runner.motion.fk, limits)
     wrong = copy.copy(mirror)
@@ -174,9 +173,8 @@ def test_a_mapping_that_the_kinematics_contradict_is_refused_with_the_link(blink
 
 
 @requires_genesis
-def test_the_world_model_fits_the_mirror_image_of_the_share_of_each_batch(blinkmimic_runner, mirror):
+def test_the_world_model_fits_the_mirror_image_of_the_share_of_each_batch(runner, mirror):
     """A fully mirrored batch scores as the batch mirrored by hand, and a half mirrored batch keeps its second half."""
-    runner = blinkmimic_runner
     runner.learn(num_learning_iterations=2)
     options = WorldModelOptions(hidden_dims=(32,), batch_size=8, num_batches=1, horizon=4)
     windows = runner.replay_buffer.sample(options.horizon, options.batch_size)
@@ -213,7 +211,6 @@ def test_the_simulator_steps_a_mirrored_state_under_the_mirrored_action_to_the_m
 
     cfg = small_learner(supermimic_config(supermimic_library, rsi_noise=False))
     cfg.env_options.num_envs = 2
-    cfg.runner_options.world_model.mirror_share = 0.5
     # One context for both envs: the mirror of a context is tested apart, and here only the state differs.
     events = cfg.event_options
     events.foot_friction.friction_range = (0.8, 0.8)

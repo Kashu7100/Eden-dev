@@ -3,8 +3,7 @@
 The environment is the BeyondMimic tracking task as SuperMimic configures it: the pelvis as the anchor, no pushes,
 no self-collision penalty, a joint-limit weight of -2, foot friction, torso centre-of-mass and encoder-bias
 randomization fixed per env, and episodes truncated at the end of each reference clip. The learner is
-:class:`~eden.learning.wrappers.rsl_rl.supermimic.SuperMimicRunnerOptions`, with SuperMimic's hyperparameters or,
-under ``--recipe blinkmimic``, BlinkMimic's (:class:`SuperMimicRecipeMod`).
+:class:`~eden.learning.wrappers.rsl_rl.supermimic.SuperMimicRunnerOptions`.
 """
 
 from __future__ import annotations
@@ -138,65 +137,15 @@ class SuperMimicDataMod(TaskMod):
         return config
 
 
-class SuperMimicRecipeMod(TaskMod):
-    """Select the learner's recipe: SuperMimic's hyperparameters, or the learner-side ones of BlinkMimic's released
-    recipe (https://github.com/fuyichen0725/blinkmimic, ``PRESET[main]``).
-
-    ``eden train --task supermimic --recipe blinkmimic``
-
-    The BlinkMimic recipe averages the actor for replay, adds the reference action to the actor's output, mirrors
-    half of every world-model batch, sends 30% of the resets to the bins before recent falls, and trains a smaller
-    world model on half the batches and the actor on half the rollouts at four times the learning rate until the
-    return reaches 0.75. BlinkMimic counts in update rounds, of which this task runs 4 per iteration at 4096 envs
-    (0.4 per env step, 10 env steps per iteration), so its deadline of 1400 rounds and ramp of 300 are 350 and 75
-    iterations here. Its contact reward and evaluation-guided resets are not ported.
-    """
-
-    def __init__(
-        self,
-        recipe: Annotated[
-            Literal["supermimic", "blinkmimic"],
-            "Learner hyperparameters: SuperMimic's, or those of BlinkMimic's recipe.",
-        ] = "supermimic",
-    ):
-        self.recipe = recipe
-
-    def apply(self, config: SuperMimicConfig) -> SuperMimicConfig:
-        if self.recipe == "supermimic":
-            return config
-        runner = config.runner_options
-        world_model, policy, sampler = runner.world_model, runner.policy, runner.return_sampler
-        world_model.hidden_dims = (1024, 1024, 1024)
-        world_model.num_batches = 5
-        world_model.lr = 4e-4
-        world_model.mirror_share = 0.5
-        # Half the world-model batches per round: half the ratio keeps the rounds per env step at 0.4.
-        runner.replay_ratio = 8.0
-        policy.lr = 4e-4
-        policy.lr_multiplier = 4.0
-        policy.lr_decay_return = 0.75
-        policy.lr_decay_deadline = 350
-        policy.lr_decay_iterations = 75
-        policy.batch_size = 2048
-        policy.ema_decay = 0.995
-        policy.reference_action = True
-        # 30% of the resets before recent falls; the other 70% keep the 0.5 / 0.4 / 0.1 split of explore, focus and keep.
-        sampler.failure = 0.3
-        sampler.explore = 0.35
-        sampler.keep = 0.07
-        return config
-
-
 def _tracked(name: str) -> dict:
     return {"entity_name": "robot", "links_name": [name]}
 
 
-@TASK_REGISTRY.register(name="supermimic", modifiers=(SuperMimicDataMod(), SuperMimicRecipeMod()))
+@TASK_REGISTRY.register(name="supermimic", modifiers=(SuperMimicDataMod(),))
 class SuperMimicConfig(EdenMimicConfig):
     """G1 whole-body motion tracking trained with SuperMimic.
 
     ``motion_options`` is set by :class:`SuperMimicDataMod`; build the task with ``TASK_REGISTRY.build("supermimic")``.
-    :class:`SuperMimicRecipeMod` selects the learner's hyperparameters.
     """
 
     scene_options: SceneOptions = en.scenes.Empty(robot=_G1, plane=PlaneOptions(default_geoms_friction={"*": 0.01}))

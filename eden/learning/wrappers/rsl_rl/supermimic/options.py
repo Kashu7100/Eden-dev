@@ -33,16 +33,16 @@ class WorldModelOptions(ConfigurableOptions):
         task's randomization must be mirror symmetric, which the runner checks at construction.
     """
 
-    hidden_dims: tuple[int, ...] = (2048, 2048, 2048)
-    lr: float = 2e-4
-    num_batches: int = 10
+    hidden_dims: tuple[int, ...] = (1024, 1024, 1024)
+    lr: float = 4e-4
+    num_batches: int = 5
     batch_size: int = 2048
     horizon: int = 8
     nominal_error_root_pos: float = 0.01
     nominal_error_root_ori: float = 0.02
     nominal_error_joint_pos: float = 0.1
     nominal_error_joint_vel: float = 3.14
-    mirror_share: float = 0.0
+    mirror_share: float = 0.5
 
     @model_validator(mode="after")
     def _check(self) -> WorldModelOptions:
@@ -124,15 +124,15 @@ class PolicyOptions(ConfigurableOptions):
     """
 
     algorithm: Literal["actor_critic", "bptt"] = "actor_critic"
-    lr: float = 2e-4
-    lr_multiplier: float = 1.0
-    lr_decay_return: float | None = None
-    lr_decay_deadline: int | None = None
+    lr: float = 4e-4
+    lr_multiplier: float = 4.0
+    lr_decay_return: float | None = 0.75
+    lr_decay_deadline: int | None = 350
     lr_decay_iterations: int = 75
-    ema_decay: float = 0.0
-    reference_action: bool = False
+    ema_decay: float = 0.995
+    reference_action: bool = True
     num_batches: int = 1
-    batch_size: int = 4096
+    batch_size: int = 2048
     horizon: int = 32
     gamma: float = 0.99
     lam: float = 0.95
@@ -183,16 +183,6 @@ class PolicyOptions(ConfigurableOptions):
             raise ValueError(f"lr_decay_deadline is an iteration, got {self.lr_decay_deadline}.")
         if self.lr_decay_iterations < 1:
             raise ValueError(f"lr_decay_iterations must be at least 1, got {self.lr_decay_iterations}.")
-        decay = {
-            name: getattr(self, name)
-            for name in ("lr_decay_return", "lr_decay_deadline")
-            if getattr(self, name) is not None
-        }
-        if decay and self.lr_multiplier == 1.0:
-            raise ValueError(
-                f"{decay} ramp lr_multiplier to 1, but lr_multiplier is already 1.0, so they would change nothing. "
-                "Set lr_multiplier, or leave them at None."
-            )
         return self
 
 
@@ -248,9 +238,9 @@ class ReturnSamplerOptions(ConfigurableOptions):
     horizon: int = 20
     memory: int = 256
     steepness: float = 25.0
-    explore: float = 0.5
-    keep: float = 0.1
-    failure: float = 0.0
+    explore: float = 0.35
+    keep: float = 0.07
+    failure: float = 0.3
     failure_lead_s: float = 1.0
 
     @model_validator(mode="after")
@@ -379,7 +369,7 @@ class SuperMimicRunnerOptions(RslRlBaseRunnerOptions):
     clip_end_termination: str = "clip_end"
     reward_terms: RewardTermsOptions = RewardTermsOptions()
     buffer_size: int = 1000
-    replay_ratio: float = 16.0
+    replay_ratio: float = 8.0
     world_model: WorldModelOptions = WorldModelOptions()
     policy: PolicyOptions = PolicyOptions()
     velocity_goal: VelocityGoalOptions = VelocityGoalOptions()
