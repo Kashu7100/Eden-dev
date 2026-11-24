@@ -115,8 +115,8 @@ Off-policy SAC from the external `rsl-rl-flashsac` package, which is not on PyPI
 ### SuperMimic
 
 A motion tracker trained through one learned, differentiable world model (the `supermimic` task). The options
-default to SuperMimic's hyperparameters; `eden train --task supermimic --recipe blinkmimic` sets those of BlinkMimic's
-recipe (`SuperMimicRecipeMod` in `eden/tasks/supermimic/config.py`).
+default to SuperMimic's method with BlinkMimic's learner-side recipe; `examples/projects/mimic/supermimic/README.md`
+lists the defaults that differ from the SuperMimic paper's values.
 
 ::: eden.learning.wrappers.rsl_rl.supermimic.options
     options:
