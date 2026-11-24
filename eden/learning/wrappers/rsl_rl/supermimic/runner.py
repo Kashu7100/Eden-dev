@@ -149,8 +149,11 @@ class _SuperMimicRunner:
         #: Allocated by :meth:`learn`; a runner built to replay a checkpoint holds no transitions.
         self.replay_buffer: ReplayBuffer | None = None
         self._history: torch.Tensor | None = None
-        #: :meth:`_act_from` as a CUDA graph the host does not wait for: the env step queues behind it.
-        self._act = CapturedUpdate(self._act_from, lambda: graph_state([self.actor, self.dynamics], []), wait=False)
+        #: :meth:`_act_from` as a CUDA graph the host does not wait for: the env step queues behind it. It replays
+        #: between the learners' updates and the read of their losses, so it records into a pool of its own.
+        self._act = CapturedUpdate(
+            self._act_from, lambda: graph_state([self.actor, self.dynamics], []), wait=False, own_pool=True
+        )
         #: Reset bins of a loaded checkpoint whose return sampler does not fit this run's library (:meth:`load`).
         self._stale_sampler_bins: int | None = None
         #: The iteration from which ``policy.lr_multiplier`` ramps to 1; ``None`` until the ramp starts.
@@ -422,9 +425,11 @@ class _SuperMimicRunner:
         return policy.lr_multiplier + (1.0 - policy.lr_multiplier) * progress
 
     def _start_lr_decay_if_due(self, next_iteration: int, normalized_return: float | None) -> None:
-        """Start the ramp at ``next_iteration`` if the return or the deadline calls for it."""
+        """Start the ramp at ``next_iteration`` if the return or the deadline calls for it. A multiplier of 1 has
+        no ramp.
+        """
         policy = self.options.policy
-        if self._lr_decay_start is not None:
+        if self._lr_decay_start is not None or self.policy_learner.lr_scale is None:
             return
         reached = (
             policy.lr_decay_return is not None
@@ -573,7 +578,8 @@ class _SuperMimicRunner:
             return
         checkpoint = {
             "actor": self.actor.state_dict(),
-            "actor_ema": None if self.actor_ema is None else self.actor_ema.state_dict(),
+            # Until the first policy update the average is the untrained actor without normalizer statistics.
+            "actor_ema": self.actor_ema.state_dict() if self.policy_learner.average_started else None,
             "dynamics": self.dynamics.state_dict(),
             "critic": None if self.critic is None else self.critic.state_dict(),
             "world_model_optimizers": [o.state_dict() for o in self.world_model_learner.optimizers],
@@ -598,8 +604,6 @@ class _SuperMimicRunner:
         """
         checkpoint = torch.load(path, map_location=map_location or self.device, weights_only=False)
         saved_layout, layout = checkpoint.get("layout"), self._layout()
-        if saved_layout is not None:
-            saved_layout = _LAYOUT_DEFAULTS | saved_layout
         # A checkpoint written before the layout record existed: the algorithm shows in whether it holds a critic.
         if saved_layout is None and (self.critic is None) != (checkpoint["critic"] is None):
             trained = "bptt" if checkpoint["critic"] is None else "actor_critic"
@@ -608,7 +612,11 @@ class _SuperMimicRunner:
                 f"policy.algorithm={self.options.policy.algorithm!r}: one has a critic and the other does not. "
                 f"Set runner_options.policy.algorithm={trained!r} to load it."
             )
-        if saved_layout is not None and saved_layout != layout:
+        # An entry the checkpoint lacks is compared at the value it trained with; without a record, those alone.
+        if saved_layout is None:
+            saved_layout = {key: layout[key] for key in layout.keys() - _LAYOUT_DEFAULTS.keys()}
+        saved_layout = _LAYOUT_DEFAULTS | saved_layout
+        if saved_layout != layout:
             differ = {
                 key: (saved_layout.get(key), layout.get(key))
                 for key in saved_layout.keys() | layout.keys()

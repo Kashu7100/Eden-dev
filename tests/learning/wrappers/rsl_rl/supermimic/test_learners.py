@@ -1,8 +1,15 @@
 """The learners' optimizer handling."""
 
+import pytest
 import torch
+from tensordict import TensorDict
 
-from eden.learning.wrappers.rsl_rl.supermimic.learners import build_optimizers, load_optimizer_state, optimize
+from eden.learning.wrappers.rsl_rl.supermimic.learners import (
+    CapturedUpdate,
+    build_optimizers,
+    load_optimizer_state,
+    optimize,
+)
 
 
 def _stepped(seed: int):
@@ -70,3 +77,26 @@ def test_a_scale_of_one_leaves_the_step_as_it_is():
     plain = _net_after_steps(lr=1e-3, lr_scale=None)
     for got, expected in zip(scaled.parameters(), plain.parameters(), strict=True):
         torch.testing.assert_close(got, expected, atol=1e-7, rtol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="a CUDA graph needs a CUDA device")
+def test_an_update_with_its_own_pool_leaves_the_outputs_of_the_updates_recorded_after_it():
+    device, rows = torch.device("cuda:0"), 1024
+    weight = torch.ones(rows, device=device)
+
+    def scratch_then_sum(inputs):
+        scratch = inputs["x"] * 2.0  # freed when the recording ends, for the next recording of its pool to take
+        return {"sum": (scratch + weight).sum()}
+
+    def shifted(inputs):
+        return {"y": inputs["x"] + weight}
+
+    def batch(value):
+        return TensorDict({"x": torch.full((rows,), value, device=device)}, batch_size=[rows])
+
+    acting = CapturedUpdate(scratch_then_sum, lambda: [weight], warmup=0, own_pool=True)
+    learning = CapturedUpdate(shifted, lambda: [weight], warmup=0)
+    acting(batch(1.0))
+    kept = learning(batch(3.0))["y"]
+    assert float(acting(batch(7.0))["sum"]) == rows * 15.0
+    torch.testing.assert_close(kept, torch.full((rows,), 4.0, device=device))

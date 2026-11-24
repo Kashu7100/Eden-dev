@@ -74,13 +74,14 @@ On BONES-SEED (129,513 clips), same GPU and env count, one seed, on 2,000 clips 
 
 | Options | Iterations | Training time | Failed clips | MPJPE |
 |---|---|---|---|---|
-| paper values | 2000 | 40 min | 5 | 24.2 mm |
+| paper values | 2000 | 49 min | 5 | 24.2 mm |
 | defaults | 500 | 5 min | 7 | 26.0 mm |
 | defaults | 1000 | 10 min | 4 | 24.4 mm |
 | defaults | 2000 | 20 min | 2 | 22.9 mm |
 
 Training time is that many iterations at 0.6 s for the defaults and 1.2 s for the paper's values, without
-startup. The failed-clip count moves by a few clips from one checkpoint to the next and, on BONES-SEED, by about
+startup. The BONES-SEED checkpoint of the paper's values was trained before the speed changes, at 1.48 s per
+iteration. The failed-clip count moves by a few clips from one checkpoint to the next and, on BONES-SEED, by about
 two between evaluations of one checkpoint. Time per round varies by a few percent between nodes of the same GPU
 model.
 

@@ -132,10 +132,14 @@ class CapturedUpdate:
     """Runs ``fn`` eagerly for its first ``warmup`` calls, then records it once as a CUDA graph and replays it.
 
     ``fn`` must be capture-safe: no host syncs, fixed shapes, and every tensor it reads besides its inputs updated in
-    place. Python values it reads are fixed at capture, and each replay overwrites the outputs it returns. All
-    captured updates on a device record on one stream into one memory pool and replay in the order they were
-    recorded. A replay raises if a tensor in ``state()`` moved, so a checkpoint's optimizer state is loaded into
-    the existing tensors (:func:`load_optimizer_state`). On the CPU ``fn`` always runs eagerly.
+    place. Python values it reads are fixed at capture, and each replay overwrites the outputs it returns. A
+    replay raises if a tensor in ``state()`` moved, so a checkpoint's optimizer state is loaded into the existing
+    tensors (:func:`load_optimizer_state`). On the CPU ``fn`` always runs eagerly.
+
+    The captured updates on a device record on one stream and, by default, into one memory pool, where a replay
+    writes over the outputs of the updates recorded after it. Those must therefore replay in the order they were
+    recorded, each before its outputs are read. ``own_pool=True`` records into a pool of the update's own, for one
+    that replays at any other point.
 
     A call returns once the replay is done; ``wait=False`` returns once it is queued on the stream.
     """
@@ -146,11 +150,13 @@ class CapturedUpdate:
         state: Callable[[], list[torch.Tensor]],
         warmup: int = 3,
         wait: bool = True,
+        own_pool: bool = False,
     ):
         self._fn = fn
         self._state = state
         self._warmup = warmup
         self._wait = wait
+        self._own_pool = own_pool
         self._inputs: TensorDict | None = None
         self._graph: torch.cuda.CUDAGraph | None = None
         self._identity: list[int] = []
@@ -175,7 +181,7 @@ class CapturedUpdate:
                 return outputs
             if self._graph is None:
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, pool=pool, stream=stream):
+                with torch.cuda.graph(graph, pool=None if self._own_pool else pool, stream=stream):
                     self._outputs = self._fn(self._inputs)
                 self._graph, self._identity = graph, [x.data_ptr() for x in self._state()]
             elif [x.data_ptr() for x in state] != self._identity:

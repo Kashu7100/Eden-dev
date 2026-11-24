@@ -50,9 +50,9 @@ class RunLogger:
                 project=options.wandb_project, name=run_name, dir=self.log_dir, config=options.dict()
             )
         else:
-            from torch.utils.tensorboard import SummaryWriter
+            from torch.utils.tensorboard.writer import FileWriter
 
-            self._writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+            self._writer = FileWriter(self.log_dir, flush_secs=10)
 
     def process_env_step(self, rewards: torch.Tensor, dones: torch.Tensor, extras: dict) -> None:
         if self.disable_logs:
@@ -118,14 +118,15 @@ class RunLogger:
         print("\n".join(lines))
 
     def _write_scalars(self, scalars: dict[str, float], step: int) -> None:
-        """Write an iteration's scalars to TensorBoard as one event holding every tag. ``add_scalar`` writes one
-        event per scalar, each appended with an open and a close of the file, which is slow on a network file system.
+        """Write an iteration's scalars to TensorBoard as one event holding every tag. ``SummaryWriter.add_scalar``
+        writes one event per scalar, each appended with an open and a close of the file, which is slow on a network
+        file system.
         """
         from tensorboard.compat.proto.summary_pb2 import Summary
         from torch.utils.tensorboard.summary import scalar
 
         values = [value for key, x in scalars.items() for value in scalar(key, x).value]
-        self._writer._get_file_writer().add_summary(Summary(value=values), step)
+        self._writer.add_summary(Summary(value=values), step)
 
     def close(self) -> None:
         if self._writer is not None:

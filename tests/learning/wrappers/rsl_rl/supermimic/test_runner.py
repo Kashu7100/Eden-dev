@@ -510,6 +510,22 @@ def test_a_checkpoint_trained_without_the_reference_action_is_refused_with_the_o
     _write_as_before_the_recipes_options(paper_runner, path)
     with pytest.raises(ValueError, match=message):
         runner.load(path)
+    checkpoint = torch.load(path, weights_only=False)
+    del checkpoint["layout"]  # a checkpoint written before the layout record
+    torch.save(checkpoint, path)
+    with pytest.raises(ValueError, match=message):
+        runner.load(path)
+    paper_runner.load(path)
+
+
+def test_a_checkpoint_saved_before_the_first_policy_update_holds_no_average(runner, tmp_path):
+    path, started = str(tmp_path / "model.pt"), runner.policy_learner.average_started
+    runner.policy_learner.average_started = False  # as before the first update, whatever earlier tests trained
+    try:
+        runner.save(path)
+    finally:
+        runner.policy_learner.average_started = started
+    assert torch.load(path, weights_only=False)["actor_ema"] is None
 
 
 def test_a_run_config_written_before_the_recipes_options_replays_under_the_override_the_error_names(
@@ -634,6 +650,14 @@ def test_the_learning_rate_ramp_starts_when_the_return_reaches_its_threshold(run
         assert [runner._lr_multiplier(it) for it in (9, 9 + 25, 9 + 75, 9 + 500)] == pytest.approx([4.0, 3.0, 1.0, 1.0])
     finally:
         runner._lr_decay_start = started
+
+
+def test_a_multiplier_of_one_has_no_ramp_to_start(paper_runner, eden_caplog):
+    policy = paper_runner.options.policy
+    assert (policy.lr_multiplier, policy.lr_decay_deadline) == (1.0, 350)
+    paper_runner._start_lr_decay_if_due(400, 0.9)
+    assert paper_runner._lr_decay_start is None
+    assert "ramps" not in eden_caplog.text
 
 
 def test_the_learning_rate_ramp_starts_at_its_deadline_and_survives_a_resume(library, tmp_path):

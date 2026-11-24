@@ -71,7 +71,7 @@ def main() -> None:
     saved = os.path.join(os.path.dirname(os.path.abspath(args.checkpoint)), "config.json")
     if os.path.exists(saved):
         cfg = EdenConfig.load_from_file(saved)
-        if not isinstance(cfg, SuperMimicConfig):
+        if type(cfg) is not SuperMimicConfig:
             raise SystemExit(f"{saved} is a {type(cfg).__name__}, not the supermimic task's config.")
         cfg.env_options.reset_training_only_fields()
         if library:
