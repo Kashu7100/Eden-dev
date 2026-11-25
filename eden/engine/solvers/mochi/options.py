@@ -196,9 +196,6 @@ class MochiOptions(GravityMixin, TimeBasedMixin):
     IK_max_targets : int, optional
         Maximum number of simultaneous target links of an inverse-kinematics solve (the scratch buffers are quadratic
         in it and allocated at the first solve). Defaults to 6.
-    vis : gs.options.KinematicVisOptions, optional
-        The markers the interactive viewer and the debug cameras draw for the solver's links (their frames), as for a
-        kinematic solver. Defaults to KinematicVisOptions().
     """
 
     IK_max_targets: PositiveInt = 6
@@ -248,6 +245,9 @@ class MochiOptions(GravityMixin, TimeBasedMixin):
     batch_joints_info: StrictBool = False
     batch_dofs_info: StrictBool = False
     vis: KinematicVisOptions = Field(default_factory=KinematicVisOptions)
+    """The markers the interactive viewer and the debug cameras draw for the solver's links (their frames), as for a
+    kinematic solver. Documented here rather than under ``Parameters``: the class inherits ``Options.__init__(**data)``,
+    so griffe flags every entry there (``docs/hooks/griffe_warnings.py``)."""
 
     def model_post_init(self, context: Any) -> None:
         if not (0.0 < self.linesearch_alpha < 1.0):
